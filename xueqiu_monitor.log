@@ -1,0 +1,121 @@
+2026-04-26 17:13:47,464 - INFO - ==================================================
+2026-04-26 17:13:47,465 - INFO - 雪球组合监控任务开始 - 2026-04-26 17:13:47
+2026-04-26 17:13:47,465 - INFO - 开始检查组合: ZH3605259
+2026-04-26 17:13:47,629 - ERROR - 雪球API请求失败: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/portfolio/stock/position?symbol=ZH3605259&market=cn&extend=detail&page=1&size=100
+2026-04-26 17:13:47,666 - ERROR - 雪球API请求失败: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/portfolio/stock/quote?symbol=ZH3605259&extend=detail
+2026-04-26 17:13:47,668 - WARNING - 获取 ZH3605259 数据失败
+2026-04-26 17:13:49,668 - INFO - 监控任务完成
+2026-04-26 17:17:38,144 - INFO - ==================================================
+2026-04-26 17:17:38,144 - INFO - 雪球组合监控任务开始 - 2026-04-26 17:17:38
+2026-04-26 17:17:38,144 - INFO - 开始检查组合: ZH3605259
+2026-04-26 17:17:38,318 - ERROR - 雪球API请求失败: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/portfolio/stock/position?symbol=ZH3605259&market=cn&extend=detail&page=1&size=100
+2026-04-26 17:17:38,354 - ERROR - 雪球API请求失败: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/portfolio/stock/quote?symbol=ZH3605259&extend=detail
+2026-04-26 17:17:38,354 - WARNING - 获取 ZH3605259 数据失败
+2026-04-26 17:17:40,355 - INFO - 监控任务完成
+2026-04-26 17:26:29,048 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:27:01,199 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:27:21,287 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:27:58,768 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:28:00,799 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:29:31,320 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:29:35,520 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:31:09,049 - INFO - 雪球API初始化成功
+2026-04-26 17:31:09,049 - INFO - ==================================================
+2026-04-26 17:31:09,049 - INFO - 开始检查组合: ZH2605259
+2026-04-26 17:31:09,246 - ERROR - 获取组合数据失败: b'{"error_description":"\xe8\xaf\xa5\xe7\xbb\x84\xe5\x90\x88\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8","error_uri":"/cubes/quote.json","error_code":"20809"}'
+2026-04-26 17:32:52,932 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:33:14,291 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:33:20,282 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:33:23,993 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:34:00,807 - INFO - 雪球API初始化成功
+2026-04-26 17:34:00,808 - INFO - ==================================================
+2026-04-26 17:34:00,808 - INFO - 开始检查组合: ZH2605259
+2026-04-26 17:34:01,004 - ERROR - 获取组合数据失败: b'{"error_description":"\xe8\xaf\xa5\xe7\xbb\x84\xe5\x90\x88\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8","error_uri":"/cubes/quote.json","error_code":"20809"}'
+2026-04-26 17:35:49,292 - INFO - 雪球API初始化成功
+2026-04-26 17:35:49,293 - INFO - ==================================================
+2026-04-26 17:35:49,293 - INFO - 开始检查组合: ZH2605259
+2026-04-26 17:35:49,485 - ERROR - 获取组合数据失败: b'{"error_description":"\xe8\xaf\xa5\xe7\xbb\x84\xe5\x90\x88\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8","error_uri":"/cubes/quote.json","error_code":"20809"}'
+2026-04-26 17:36:04,549 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-26 17:36:10,828 - INFO - 雪球API初始化成功
+2026-04-26 17:36:10,828 - INFO - ==================================================
+2026-04-26 17:36:10,828 - INFO - 开始检查组合: ZH2605259
+2026-04-26 17:36:11,019 - ERROR - 获取组合数据失败: b'{"error_description":"\xe8\xaf\xa5\xe7\xbb\x84\xe5\x90\x88\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8","error_uri":"/cubes/quote.json","error_code":"20809"}'
+2026-04-28 22:47:18,941 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-28 22:47:44,977 - ERROR - pysnowball 未安装，请执行: pip install git+https://github.com/Pa55w0rd/pysnowball.git
+2026-04-28 22:55:24,810 [INFO] 首次检查...
+2026-04-28 22:55:24,811 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 22:55:24,942 [ERROR] [ZH2605259] 异常: 400 Client Error:  for url: https://stock.xueqiu.com/v5/stock/portfolio/quote/current.json?code=ZH2605259
+2026-04-28 22:55:27,101 [INFO] 等待 300 秒后再次检查（下次约 22:55:27）...
+2026-04-28 23:00:00,006 [INFO] 监控已手动停止
+2026-04-28 23:00:02,020 [INFO] 首次检查...
+2026-04-28 23:00:02,020 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:00:02,175 [ERROR] [ZH2605259] 异常: 404 Client Error:  for url: https://stock.xueqiu.com/v5/stock/portfolio/quote/current.json?code=ZH2605259
+2026-04-28 23:00:04,310 [INFO] 等待 300 秒后再次检查（下次约 23:00:04）...
+2026-04-28 23:00:12,495 [INFO] 监控已手动停止
+2026-04-28 23:02:28,851 [INFO] 首次检查...
+2026-04-28 23:02:28,851 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:02:29,016 [ERROR] [ZH2605259] 异常: 404 Client Error:  for url: https://stock.xueqiu.com/v5/stock/portfolio/quote/current.json?code=ZH2605259
+2026-04-28 23:02:31,160 [INFO] 等待 30 秒后再次检查（下次约 23:02:31）...
+2026-04-28 23:03:01,160 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:03:01,208 [ERROR] [ZH2605259] 异常: 404 Client Error:  for url: https://stock.xueqiu.com/v5/stock/portfolio/quote/current.json?code=ZH2605259
+2026-04-28 23:03:03,346 [INFO] 等待 30 秒后再次检查（下次约 23:03:03）...
+2026-04-28 23:03:29,239 [INFO] 监控已手动停止
+2026-04-28 23:03:30,204 [INFO] 首次检查...
+2026-04-28 23:03:30,205 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:03:30,355 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:03:32,499 [INFO] 等待 30 秒后再次检查（下次约 23:03:32）...
+2026-04-28 23:04:02,500 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:04:02,565 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:04:04,696 [INFO] 等待 30 秒后再次检查（下次约 23:04:04）...
+2026-04-28 23:04:34,696 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:04:34,735 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:04:36,878 [INFO] 等待 30 秒后再次检查（下次约 23:04:36）...
+2026-04-28 23:05:06,879 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:05:06,918 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:05:09,061 [INFO] 等待 30 秒后再次检查（下次约 23:05:09）...
+2026-04-28 23:05:39,062 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:05:39,101 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:05:41,238 [INFO] 等待 30 秒后再次检查（下次约 23:05:41）...
+2026-04-28 23:06:11,239 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:06:11,278 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:06:13,434 [INFO] 等待 30 秒后再次检查（下次约 23:06:13）...
+2026-04-28 23:06:43,435 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:06:43,473 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:06:45,619 [INFO] 等待 30 秒后再次检查（下次约 23:06:45）...
+2026-04-28 23:07:15,620 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:07:15,660 [ERROR] [ZH2605259] 异常: 403 Client Error: Forbidden for url: https://stock.xueqiu.com/v5/cube/rebalancing/current.json?code=ZH2605259
+2026-04-28 23:07:17,805 [INFO] 等待 30 秒后再次检查（下次约 23:07:17）...
+2026-04-28 23:07:37,930 [INFO] 监控已手动停止
+2026-04-28 23:07:38,890 [INFO] 首次检查...
+2026-04-28 23:07:38,890 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:07:38,959 [INFO] [ZH2605259] 当前持仓 1 只 (current)
+2026-04-28 23:07:38,960 [INFO] 持仓数量: 1 只
+2026-04-28 23:07:39,016 [INFO] 组合名称: ZH2605259
+2026-04-28 23:07:39,016 [INFO] [ZH2605259] 检测到 1 项变动，准备发送通知
+2026-04-28 23:07:39,135 [INFO] [ZH2605259] 通知发送成功
+2026-04-28 23:07:41,138 [INFO] 等待 30 秒后再次检查（下次约 23:07:41）...
+2026-04-28 23:08:11,139 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:08:11,200 [INFO] [ZH2605259] 当前持仓 1 只 (current)
+2026-04-28 23:08:11,200 [INFO] 持仓数量: 1 只
+2026-04-28 23:08:11,255 [INFO] 组合名称: ZH2605259
+2026-04-28 23:08:11,255 [INFO] [ZH2605259] 检测到 1 项变动，准备发送通知
+2026-04-28 23:08:11,255 [INFO] [ZH2605259] 冷却期内，跳过重复通知
+2026-04-28 23:08:11,255 [ERROR] [ZH2605259] 通知发送失败
+2026-04-28 23:08:13,256 [INFO] 等待 30 秒后再次检查（下次约 23:08:13）...
+2026-04-28 23:08:43,257 [INFO] ─── 检查组合 ZH2605259 ───
+2026-04-28 23:08:43,324 [INFO] [ZH2605259] 当前持仓 1 只 (current)
+2026-04-28 23:08:43,324 [INFO] 持仓数量: 1 只
+2026-04-28 23:08:43,381 [INFO] 组合名称: ZH2605259
+2026-04-28 23:08:43,381 [INFO] [ZH2605259] 检测到 1 项变动，准备发送通知
+2026-04-28 23:08:43,524 [INFO] [ZH2605259] 通知发送成功
+2026-04-28 23:08:45,526 [INFO] 等待 30 秒后再次检查（下次约 23:08:45）...
+2026-04-28 23:09:02,908 [INFO] 监控已手动停止
+2026-04-28 23:09:03,854 [INFO] 首次检查...
+2026-04-28 23:09:03,855 [INFO] ─── 检查组合 ZH3605259 ───
+2026-04-28 23:09:03,927 [INFO] [ZH3605259] 当前持仓 2 只 (current)
+2026-04-28 23:09:03,927 [INFO] 持仓数量: 2 只
+2026-04-28 23:09:03,977 [INFO] 组合名称: ZH3605259
+2026-04-28 23:09:03,978 [INFO] [ZH3605259] 检测到 2 项变动，准备发送通知
+2026-04-28 23:09:04,136 [INFO] [ZH3605259] 通知发送成功
+2026-04-28 23:09:06,140 [INFO] 等待 30 秒后再次检查（下次约 23:09:06）...
+2026-04-28 23:09:25,721 [INFO] 监控已手动停止
