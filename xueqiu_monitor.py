@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-雪球组合变动监控 - 钉钉通知脚本 v2.0
+雪球组合变动监控 - 钉钉通知脚本 v2.1
 ──────────────────────────────────────
 功能：
   · 定时拉取雪球组合持仓数据
   · 检测持仓新增/卖出/加减仓（按仓位权重对比）
   · 有变动时通过钉钉机器人发送 Markdown 通知
+  · 记录上次调仓记录 ID，同一次调仓只推送一次（防重复）
 
 依赖安装：
-    pip install requests schedule python-dotenv
+    pip install requests python-dotenv
 
 Token 获取方式：
   1. 浏览器登录 https://xueqiu.com
@@ -331,7 +332,9 @@ def parse_nav_from_rebalancing(latest_rb: dict) -> dict:
 
 def detect_changes(old: list[dict], new: list[dict]) -> list[dict]:
     """
-    对比新旧持仓，按 prev_weight → weight 变动检测。
+    对比新旧持仓，以上次保存的 weight 为基准检测变动（而非 prev_weight）。
+    这样可避免同一次调仓被多轮检查重复触发。
+
     返回变动列表，每项格式：
     {'type': '新增'/'卖出'/'加仓'/'减仓', 'symbol': ..., 'name': ...,
      'old_weight': ..., 'new_weight': ..., 'price': ...}
@@ -341,7 +344,6 @@ def detect_changes(old: list[dict], new: list[dict]) -> list[dict]:
     changes = []
 
     for sym, pos in new_map.items():
-        prev_w = pos.get("prev_weight", 0)
         curr_w = pos["weight"]
         if sym not in old_map:
             changes.append({
@@ -353,14 +355,15 @@ def detect_changes(old: list[dict], new: list[dict]) -> list[dict]:
                 "price": pos["price"],
             })
         else:
-            old_prev = old_map[sym].get("prev_weight", 0)
-            delta = curr_w - old_prev
+            # 使用上次保存的 weight（而非 API 的 prev_weight）进行对比，防止重复触发
+            old_w = old_map[sym].get("weight", 0)
+            delta = curr_w - old_w
             if abs(delta) >= WEIGHT_CHANGE_THRESHOLD:
                 changes.append({
                     "type": "加仓" if delta > 0 else "减仓",
                     "symbol": sym,
                     "name": pos["name"],
-                    "old_weight": old_prev,
+                    "old_weight": old_w,
                     "new_weight": curr_w,
                     "price": pos["price"],
                 })
@@ -371,7 +374,7 @@ def detect_changes(old: list[dict], new: list[dict]) -> list[dict]:
                 "type": "卖出",
                 "symbol": sym,
                 "name": pos["name"],
-                "old_weight": pos.get("prev_weight", 0),
+                "old_weight": pos.get("weight", 0),
                 "new_weight": 0,
                 "price": pos["price"],
             })
@@ -452,12 +455,28 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
             if not new_positions:
                 logger.warning(f"[{cube_id}] 持仓列表为空，可能 Cookie 失效或组合不存在")
 
-            # 获取最新调仓记录（含组合名称）
+            # 获取最新调仓记录（含组合名称和调仓ID）
             latest_rb = client.get_latest_rebalancing()
             nav_info = parse_nav_from_rebalancing(latest_rb)
             if not nav_info.get("name"):
                 nav_info["name"] = cube_id
             logger.info(f"组合名称: {nav_info['name']}")
+
+            # ── 防重复推送：对比调仓记录 ID ──────────────────────────────
+            rb_id = latest_rb.get("id") if latest_rb else None
+            last_rb_id = state.get(cube_id, {}).get("last_rb_id")
+
+            if rb_id and rb_id == last_rb_id:
+                logger.info(f"[{cube_id}] 调仓记录未变化（ID={rb_id}），跳过通知")
+                # 仅更新检查时间，不改变持仓快照
+                if cube_id in state:
+                    state[cube_id]["last_check"] = datetime.now().isoformat()
+                    state_changed = True
+                continue
+
+            if rb_id:
+                logger.info(f"[{cube_id}] 发现新调仓记录（ID={rb_id}，上次={last_rb_id}）")
+            # ─────────────────────────────────────────────────────────────
 
             # 对比变动
             old_positions = state.get(cube_id, {}).get("positions", [])
@@ -469,18 +488,27 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
                 ok = notifier.send_markdown(title, content, cube_id=cube_id)
                 if ok:
                     logger.info(f"[{cube_id}] 通知发送成功")
+                    # 推送成功 → 更新完整状态（含新 rb_id）
+                    state[cube_id] = {
+                        "positions": new_positions,
+                        "nav": nav_info,
+                        "last_rb_id": rb_id,
+                        "last_check": datetime.now().isoformat(),
+                    }
+                    state_changed = True
                 else:
-                    logger.error(f"[{cube_id}] 通知发送失败")
+                    logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
+                    # 推送失败 → 不更新状态，下次重试
             else:
                 logger.info(f"[{cube_id}] 无持仓变动（阈值 {WEIGHT_CHANGE_THRESHOLD}%）")
-
-            # 更新状态
-            state[cube_id] = {
-                "positions": new_positions,
-                "nav": nav_info,
-                "last_check": datetime.now().isoformat(),
-            }
-            state_changed = True
+                # 无变动 → 更新快照和 rb_id（避免下次重复对比）
+                state[cube_id] = {
+                    "positions": new_positions,
+                    "nav": nav_info,
+                    "last_rb_id": rb_id,
+                    "last_check": datetime.now().isoformat(),
+                }
+                state_changed = True
 
         except Exception as e:
             logger.error(f"[{cube_id}] 异常: {e}")
@@ -519,7 +547,7 @@ def _check_config() -> bool:
 
 def main():
     print("=" * 60)
-    print("  雪球组合变动监控 v2.0  ·  钉钉通知")
+    print("  雪球组合变动监控 v2.1  ·  钉钉通知")
     print("=" * 60)
 
     if not _check_config():
