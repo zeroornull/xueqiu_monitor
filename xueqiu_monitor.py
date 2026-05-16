@@ -405,7 +405,7 @@ def build_markdown(cube_id: str, nav_info: dict, changes: list[dict]) -> tuple[s
     lines = [
         f"## {rate_emoji} {name} 持仓变动",
         f"> 组合代码：**{cube_id}**　｜　检测时间：{now}",
-        f"> 今日涨跌：**{today_rate:+.2f}%**　累计收益：{total_rate:+.2f}%",
+        # f"> 今日涨跌：**{today_rate:+.2f}%**　累计收益：{total_rate:+.2f}%",
         "",
         "### 📋 变动明细",
     ]
