@@ -20,12 +20,15 @@ Token 获取方式：
 
 import json
 import os
+import re
 import sys
 import time
+import atexit
 import logging
+import hashlib
 import traceback
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 import requests
 
@@ -94,10 +97,7 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════
-#  🌐  雪球 API 客户端（纯 requests，无第三方包依赖）
-# ══════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════
-#  🌐  雪球 API 客户端（参考用户提供的有效接口）
+#  🌐  雪球 API 客户端
 # ══════════════════════════════════════════════════════════════════
 _BASE_URL   = "https://xueqiu.com"
 _STOCK_BASE = "https://stock.xueqiu.com"
@@ -106,6 +106,66 @@ _STOCK_BASE = "https://stock.xueqiu.com"
 def _alert_cookie_expired():
     """Cookie 失效时输出高优先级日志"""
     logger.critical("雪球 Cookie 已失效，请更新 XUEQIU_COOKIE！")
+
+
+# ─────────────────────────────────────────────
+#  🔑  Token 过期检测
+# ─────────────────────────────────────────────
+
+
+def _get_token_expiry(cookie: str) -> Optional[float]:
+    """从 xq_a_token 中解析过期时间戳（秒）"""
+    m = re.search(r'xq_a_token=([^;]+)', cookie)
+    if not m:
+        return None
+    token = m.group(1).strip()
+    if '_' in token:
+        parts = token.rsplit('_', 1)
+        try:
+            ts = int(parts[1])
+            if ts > 1893456000000:  # 毫秒 → 秒
+                ts /= 1000
+            if 1672531200 <= ts <= 1893456000:  # 2023 ~ 2030
+                return float(ts)
+        except ValueError:
+            pass
+    return None
+
+
+class DingTalkNotifier:
+    pass
+
+
+def _check_token_expiry(state: dict, notifier: DingTalkNotifier) -> bool:
+    """Token 过期前 1 天发送钉钉提醒。返回 True 表示 state 已变更。"""
+    token_hash = hashlib.md5(XUEQIU_COOKIE.encode()).hexdigest()
+    token_state = state.setdefault("_token", {})
+
+    # token 被用户更新 → 重置通知状态
+    if token_state.get("hash") and token_state["hash"] != token_hash:
+        token_state.clear()
+    token_state["hash"] = token_hash
+
+    expiry = _get_token_expiry(XUEQIU_COOKIE)
+    if expiry is None:
+        return False
+
+    token_state["expiry"] = expiry
+    remaining = expiry - time.time()
+    remaining_hours = remaining / 3600
+
+    if 0 < remaining_hours <= 24 and not token_state.get("notified_expiry"):
+        content = (
+            f"## ⚠️ 雪球 Cookie 即将过期\n\n"
+            f"> 过期时间：**{datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M')}**\n"
+            f"> 剩余：**{remaining_hours:.1f} 小时**\n\n"
+            f"请及时更新 `.env` 文件中的 `XUEQIU_COOKIE`，否则监控将失效。"
+        )
+        ok = notifier.send_markdown("雪球 Cookie 即将过期", content)
+        if ok:
+            token_state["notified_expiry"] = True
+            return True
+    return False
 
 
 class XueQiuClient:
@@ -132,6 +192,7 @@ class XueQiuClient:
             "Cookie": cookie,
         })
         self._init_session()
+        atexit.register(self.session.close)
 
     def _init_session(self):
         try:
@@ -208,7 +269,7 @@ class XueQiuClient:
                     "prev_weight": float(item.get("prev_weight") or 0),
                     "price":       float(item.get("price") or 0),
                 })
-        except Exception as e:
+        except (KeyError, TypeError, AttributeError) as e:
             logger.warning(f"持仓解析失败({e})，返回空列表")
             return []
 
@@ -303,27 +364,32 @@ def _save_state(state: dict):
         logger.error(f"保存状态失败: {e}")
 
 
+def _save_cube_state(state: dict, cube_id: str, positions: list, nav_info: dict, rb_id) -> None:
+    """保存组合持仓快照和调仓记录ID"""
+    state[cube_id] = {
+        "positions": positions,
+        "nav": nav_info,
+        "last_rb_id": rb_id,
+        "last_check": datetime.now().isoformat(),
+    }
+
+
 # ══════════════════════════════════════════════════════════════════
 #  🔍  数据解析
 # ══════════════════════════════════════════════════════════════════
 
 
-def parse_nav_from_rebalancing(latest_rb: dict) -> dict:
-    """从调仓记录中解析组合名称和基本信息"""
+def parse_nav_from_rebalancing(latest_rb: dict) -> dict[str, Any]:
+    """从调仓记录中解析组合名称"""
     if not latest_rb:
-        return {"name": "", "today_gain_rate": 0, "total_gain_rate": 0}
+        return {"name": ""}
     data = latest_rb if isinstance(latest_rb, dict) else {}
-    # 从 rebalancing_histories 第一条取组合名
     histories = data.get("rebalancing_histories", [])
     cube_name = (
         histories[0].get("cube_name", "")
         if histories else data.get("cube_name", "")
     )
-    return {
-        "name": cube_name,
-        "today_gain_rate": 0,    # 调仓记录不含当日涨跌，需另查净值接口
-        "total_gain_rate": 0,    # 同上
-    }
+    return {"name": cube_name}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -395,17 +461,13 @@ def build_markdown(cube_id: str, nav_info: dict, changes: list[dict]) -> tuple[s
     返回 (title, content)
     """
     name = nav_info.get("name") or cube_id
-    today_rate = nav_info.get("today_gain_rate", 0)
-    total_rate = nav_info.get("total_gain_rate", 0)
     now = datetime.now().strftime("%m/%d %H:%M")
 
-    rate_emoji = "📈" if today_rate >= 0 else "📉"
     title = f"雪球组合变动 · {name}"
 
     lines = [
-        f"## {rate_emoji} {name} 持仓变动",
+        f"## 📈 {name} 持仓变动",
         f"> 组合代码：**{cube_id}**　｜　检测时间：{now}",
-        # f"> 今日涨跌：**{today_rate:+.2f}%**　累计收益：{total_rate:+.2f}%",
         "",
         "### 📋 变动明细",
     ]
@@ -443,6 +505,10 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
     """对所有监控组合执行一次检查"""
     state = _load_state()
     state_changed = False
+
+    # Token 过期检查（仅首次检测到即将过期时发通知）
+    if _check_token_expiry(state, notifier):
+        state_changed = True
 
     for cube_id in MONITORED_CUBES:
         logger.info(f"─── 检查组合 {cube_id} ───")
@@ -489,12 +555,7 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
                 if ok:
                     logger.info(f"[{cube_id}] 通知发送成功")
                     # 推送成功 → 更新完整状态（含新 rb_id）
-                    state[cube_id] = {
-                        "positions": new_positions,
-                        "nav": nav_info,
-                        "last_rb_id": rb_id,
-                        "last_check": datetime.now().isoformat(),
-                    }
+                    _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                     state_changed = True
                 else:
                     logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
@@ -502,12 +563,7 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
             else:
                 logger.info(f"[{cube_id}] 无持仓变动（阈值 {WEIGHT_CHANGE_THRESHOLD}%）")
                 # 无变动 → 更新快照和 rb_id（避免下次重复对比）
-                state[cube_id] = {
-                    "positions": new_positions,
-                    "nav": nav_info,
-                    "last_rb_id": rb_id,
-                    "last_check": datetime.now().isoformat(),
-                }
+                _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                 state_changed = True
 
         except Exception as e:
