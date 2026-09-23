@@ -1,0 +1,10 @@
+.venv/
+.xueqiu-chrome/
+.omc/
+__pycache__/
+*.py[cod]
+
+.env
+monitor_state.json
+*.log
+k3s/

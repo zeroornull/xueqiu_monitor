@@ -1,0 +1,11 @@
+[project]
+name = "xueqiu-monitor"
+version = "0.1.0"
+description = "监控雪球组合持仓变动，并通过钉钉或 Telegram 通知"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "playwright>=1.63.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.28.0",
+]

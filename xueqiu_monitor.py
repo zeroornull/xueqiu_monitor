@@ -1,21 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-雪球组合变动监控 - 钉钉通知脚本 v2.1
+雪球组合变动监控 v2.1
 ──────────────────────────────────────
 功能：
   · 定时拉取雪球组合持仓数据
   · 检测持仓新增/卖出/加减仓（按仓位权重对比）
-  · 有变动时通过钉钉机器人发送 Markdown 通知
+  · 有变动时通过已启用的钉钉、Telegram 或飞书发送通知（也可以都不启用）
   · 记录上次调仓记录 ID，同一次调仓只推送一次（防重复）
 
 依赖安装：
-    pip install requests python-dotenv
+    uv sync
 
 Token 获取方式：
-  1. 浏览器登录 https://xueqiu.com
-  2. F12 → Network → 任意请求 → Request Headers → Cookie
-  3. 复制完整 Cookie 字符串，填入 .env 文件
+    uv run python login.py
+  在打开的 Chrome 里登录雪球，Cookie 会自动写入 .env。
 """
 
 import json
@@ -24,6 +23,7 @@ import re
 import sys
 import time
 import atexit
+import base64
 import logging
 import hashlib
 import traceback
@@ -31,6 +31,8 @@ from datetime import datetime
 from typing import Optional, Any
 
 import requests
+
+from notifier import Notifier, build_notifier
 
 # ─────────────────────────────────────────────
 #  尝试加载 .env（可选，有 python-dotenv 才生效）
@@ -54,12 +56,6 @@ XUEQIU_COOKIE: str = os.environ.get(
     "xq_a_token=你的token;u=你的uid"   # ← 直接改这里，或用 .env
 )
 
-# 钉钉机器人 Webhook（必填）
-DINGTALK_WEBHOOK: str = os.environ.get(
-    "DINGTALK_WEBHOOK",
-    "https://oapi.dingtalk.com/robot/send?access_token=你的access_token"
-)
-
 # 监控的雪球组合代码列表（必填）
 # 多个组合用英文逗号分隔，如 "ZH123456,ZH654321"
 _cubes_env = os.environ.get("MONITORED_CUBES", "")
@@ -74,9 +70,6 @@ CHECK_INTERVAL: int = int(os.environ.get("CHECK_INTERVAL", "300"))
 
 # 仓位权重变动阈值（百分点），超过此值才触发通知，默认 1%
 WEIGHT_CHANGE_THRESHOLD: float = float(os.environ.get("WEIGHT_CHANGE_THRESHOLD", "1.0"))
-
-# 是否 @所有人
-AT_ALL: bool = os.environ.get("AT_ALL", "false").lower() == "true"
 
 # 日志文件（空字符串=只输出到终端）
 LOG_FILE: str = os.environ.get("LOG_FILE", "xueqiu_monitor.log")
@@ -101,71 +94,120 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════
 _BASE_URL   = "https://xueqiu.com"
 _STOCK_BASE = "https://stock.xueqiu.com"
+# 只带登录态。浏览器里的 acw_tc、ssxmod_itna 绑在原浏览器上，重放会得到 400/403。
+_AUTH_COOKIE_NAMES = ("xq_a_token", "u", "xq_id_token", "xq_r_token", "xqat", "xq_is_login")
 
 
-def _alert_cookie_expired():
-    """Cookie 失效时输出高优先级日志"""
-    logger.critical("雪球 Cookie 已失效，请更新 XUEQIU_COOKIE！")
+class CookieExpired(Exception):
+    """当前 Cookie 已被雪球拒绝，或本地解析出的过期时间已到。"""
 
 
-# ─────────────────────────────────────────────
-#  🔑  Token 过期检测
-# ─────────────────────────────────────────────
+def _cookie_hash() -> str:
+    return hashlib.md5(XUEQIU_COOKIE.encode()).hexdigest()
 
 
-def _get_token_expiry(cookie: str) -> Optional[float]:
-    """从 xq_a_token 中解析过期时间戳（秒）"""
-    m = re.search(r'xq_a_token=([^;]+)', cookie)
-    if not m:
+def _token_state(state: dict) -> dict:
+    token_state = state.setdefault("_token", {})
+    if token_state.get("hash") != _cookie_hash():
+        token_state.clear()
+        token_state["hash"] = _cookie_hash()
+    return token_state
+
+
+def _cookie_already_failed(state: dict) -> bool:
+    token_state = state.get("_token") or {}
+    return bool(token_state.get("auth_failed") and token_state.get("hash") == _cookie_hash())
+
+
+def _jwt_expiry(token: str) -> Optional[float]:
+    """读取 JWT 的 exp，不校验签名。xq_id_token 用这个字段表示过期时间。"""
+    parts = token.split(".")
+    if len(parts) < 2:
         return None
-    token = m.group(1).strip()
-    if '_' in token:
-        parts = token.rsplit('_', 1)
-        try:
-            ts = int(parts[1])
-            if ts > 1893456000000:  # 毫秒 → 秒
-                ts /= 1000
-            if 1672531200 <= ts <= 1893456000:  # 2023 ~ 2030
-                return float(ts)
-        except ValueError:
-            pass
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload))
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    exp = data.get("exp") if isinstance(data, dict) else None
+    if isinstance(exp, (int, float)) and exp > 1_000_000_000:
+        return float(exp)
     return None
 
 
-class DingTalkNotifier:
-    pass
+def _get_token_expiry(cookie: str) -> Optional[float]:
+    """优先用 xq_id_token 的 exp，其次用 xq_a_token 末尾的时间戳。"""
+    matched = re.search(r"xq_id_token=([^;]+)", cookie)
+    if matched:
+        expiry = _jwt_expiry(matched.group(1).strip().strip('"'))
+        if expiry:
+            return expiry
+    matched = re.search(r"xq_a_token=([^;]+)", cookie)
+    if not matched:
+        return None
+    token = matched.group(1).strip().strip('"')
+    if "_" not in token:
+        return None
+    try:
+        ts = int(token.rsplit("_", 1)[1])
+    except ValueError:
+        return None
+    if ts > 1893456000000:  # 毫秒 → 秒
+        ts /= 1000
+    if 1672531200 <= ts <= 1893456000:  # 2023 ~ 2030
+        return float(ts)
+    return None
 
 
-def _check_token_expiry(state: dict, notifier: DingTalkNotifier) -> bool:
-    """Token 过期前 1 天发送钉钉提醒。返回 True 表示 state 已变更。"""
-    token_hash = hashlib.md5(XUEQIU_COOKIE.encode()).hexdigest()
-    token_state = state.setdefault("_token", {})
+def _cookie_renew_hint() -> str:
+    return (
+        "请重新登录后更新 Cookie：\n"
+        "- 本机执行 `uv run python login.py`\n"
+        "- k3s 更新 `.env` 后执行 `k3s/release.sh --skip-build`"
+    )
 
-    # token 被用户更新 → 重置通知状态
-    if token_state.get("hash") and token_state["hash"] != token_hash:
-        token_state.clear()
-    token_state["hash"] = token_hash
 
+def _check_token_expiry(state: dict, notifier: Notifier) -> bool:
+    """过期前 1 天提醒一次。返回 True 表示 state 已变更。"""
+    token_state = _token_state(state)
     expiry = _get_token_expiry(XUEQIU_COOKIE)
     if expiry is None:
         return False
 
     token_state["expiry"] = expiry
-    remaining = expiry - time.time()
-    remaining_hours = remaining / 3600
+    remaining_hours = (expiry - time.time()) / 3600
+    if remaining_hours <= 0 or remaining_hours > 24 or token_state.get("notified_expiry"):
+        return False
 
-    if 0 < remaining_hours <= 24 and not token_state.get("notified_expiry"):
+    logger.warning(f"雪球 Cookie 将在 {remaining_hours:.1f} 小时后过期")
+    content = (
+        f"## ⚠️ 雪球 Cookie 即将过期\n\n"
+        f"> 过期时间：**{datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M')}**\n"
+        f"> 剩余：**{remaining_hours:.1f} 小时**\n\n"
+        f"{_cookie_renew_hint()}"
+    )
+    if notifier.send_markdown("雪球 Cookie 即将过期", content):
+        token_state["notified_expiry"] = True
+    return True
+
+
+def _stop_for_cookie(state: dict, notifier: Notifier, reason: str) -> None:
+    """通知一次并记下失效。调用方随后退出，不再请求雪球。"""
+    token_state = _token_state(state)
+    logger.critical(f"雪球 Cookie 已失效，停止请求：{reason}")
+    if not token_state.get("auth_failed") or token_state.get("notify_pending"):
         content = (
-            f"## ⚠️ 雪球 Cookie 即将过期\n\n"
-            f"> 过期时间：**{datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M')}**\n"
-            f"> 剩余：**{remaining_hours:.1f} 小时**\n\n"
-            f"请及时更新 `.env` 文件中的 `XUEQIU_COOKIE`，否则监控将失效。"
+            f"## ⚠️ 雪球 Cookie 已失效\n\n"
+            f"> 原因：{reason}\n\n"
+            f"监控已停止请求雪球，持仓快照保持不变。\n\n"
+            f"{_cookie_renew_hint()}"
         )
-        ok = notifier.send_markdown("雪球 Cookie 即将过期", content)
-        if ok:
-            token_state["notified_expiry"] = True
-            return True
-    return False
+        token_state["auth_failed"] = True
+        token_state["auth_failed_at"] = datetime.now().isoformat()
+        token_state["notify_pending"] = not notifier.send_markdown("雪球 Cookie 已失效", content)
+        if token_state["notify_pending"]:
+            logger.error("Cookie 失效通知发送失败，下次启动会再试一次，期间不再请求雪球")
+    _save_state(state)
 
 
 class XueQiuClient:
@@ -189,12 +231,26 @@ class XueQiuClient:
             "Referer": "https://xueqiu.com/",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9",
-            "Cookie": cookie,
         })
         self._init_session()
+        self._apply_auth_cookies(cookie)
+        self.last_fetch_ok = False
         atexit.register(self.session.close)
 
+    def _apply_auth_cookies(self, cookie: str) -> None:
+        parsed: dict[str, str] = {}
+        for item in cookie.split(";"):
+            item = item.strip()
+            if "=" not in item:
+                continue
+            name, value = item.split("=", 1)
+            parsed[name.strip()] = value.strip().strip('"')
+        for name in _AUTH_COOKIE_NAMES:
+            if parsed.get(name):
+                self.session.cookies.set(name, parsed[name], domain=".xueqiu.com", path="/")
+
     def _init_session(self):
+        """先访问首页，让雪球下发新的风控 Cookie，再附上登录态。"""
         try:
             self.session.get(_BASE_URL, timeout=10)
         except Exception as e:
@@ -203,13 +259,18 @@ class XueQiuClient:
     def _get(self, url: str, params: dict = None) -> Optional[dict]:
         try:
             resp = self.session.get(url, params=params, timeout=15)
+        except Exception as e:
+            logger.error(f"请求异常: {url} -> {e}")
+            return None
+        reason = _auth_failure_reason(resp)
+        if reason:
+            logger.error(f"HTTP {resp.status_code}: {url}")
+            raise CookieExpired(reason)
+        try:
             resp.raise_for_status()
             return resp.json()
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code
-            logger.error(f"HTTP {status}: {url}")
-            if status in (401, 403):
-                _alert_cookie_expired()
+        except requests.exceptions.HTTPError:
+            logger.error(f"HTTP {resp.status_code}: {url}")
         except Exception as e:
             logger.error(f"请求异常: {url} -> {e}")
         return None
@@ -224,6 +285,7 @@ class XueQiuClient:
         params1 = {"cube_symbol": self.portfolio_id}
         data = self._get(url1, params1)
         source = "current"
+        self.last_fetch_ok = data is not None
 
         # 方案2：v5 备用接口
         if data is None:
@@ -231,6 +293,7 @@ class XueQiuClient:
             params2 = {"cube_symbol": self.portfolio_id, "count": 1, "page": 1}
             data = self._get(url2, params2)
             source = "v5"
+            self.last_fetch_ok = data is not None
 
         if data is None:
             data = self._get(
@@ -238,6 +301,7 @@ class XueQiuClient:
                 {"cube_symbol": self.portfolio_id, "count": 1, "page": 1}
             )
             source = "history"
+            self.last_fetch_ok = data is not None
 
         positions = []
         try:
@@ -289,61 +353,12 @@ class XueQiuClient:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  📤  钉钉通知
-# ══════════════════════════════════════════════════════════════════
-class DingTalkNotifier:
-    """钉钉自定义机器人（无加签方式）"""
-
-    def __init__(self, webhook: str):
-        self.webhook = webhook
-        self._last_send: dict[str, float] = {}  # cube_id -> timestamp
-        self.cooldown = 60  # 同一组合 60 秒内不重复发送
-
-    def _post(self, payload: dict) -> bool:
-        try:
-            resp = requests.post(
-                self.webhook,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-            result = resp.json()
-            if result.get("errcode") == 0:
-                return True
-            logger.error(f"钉钉发送失败: {result}")
-            return False
-        except Exception as e:
-            logger.error(f"钉钉请求异常: {e}")
-            return False
-
-    def send_markdown(self, title: str, content: str, cube_id: str = "") -> bool:
-        now = time.time()
-        if cube_id and now - self._last_send.get(cube_id, 0) < self.cooldown:
-            logger.info(f"[{cube_id}] 冷却期内，跳过重复通知")
-            return False
-        payload = {
-            "msgtype": "markdown",
-            "markdown": {"title": title, "text": content},
-            "at": {"isAtAll": AT_ALL},
-        }
-        ok = self._post(payload)
-        if ok and cube_id:
-            self._last_send[cube_id] = now
-        return ok
-
-    def send_text(self, content: str) -> bool:
-        payload = {
-            "msgtype": "text",
-            "text": {"content": content},
-            "at": {"isAtAll": AT_ALL},
-        }
-        return self._post(payload)
-
-
-# ══════════════════════════════════════════════════════════════════
 #  💾  状态持久化
 # ══════════════════════════════════════════════════════════════════
-_STATE_FILE = os.path.join(os.path.dirname(__file__), "monitor_state.json")
+_STATE_FILE = os.environ.get(
+    "STATE_FILE",
+    os.path.join(os.path.dirname(__file__), "monitor_state.json"),
+)
 
 
 def _load_state() -> dict:
@@ -501,40 +516,60 @@ def build_markdown(cube_id: str, nav_info: dict, changes: list[dict]) -> tuple[s
 #  🔄  单次监控执行
 # ══════════════════════════════════════════════════════════════════
 
-def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
-    """对所有监控组合执行一次检查"""
+def _auth_failure_reason(resp: requests.Response) -> Optional[str]:
+    """401/403，或响应明确要求登录时，视为 Cookie 失效。普通 400 不在此列。"""
+    if resp.status_code in (401, 403):
+        return f"HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    description = str(data.get("error_description") or "")
+    code = str(data.get("error_code") or "")
+    if code in {"10022", "400016"} or any(word in description for word in ("登录", "cookie", "Cookie")):
+        return description[:80] or f"error_code {code}"
+    return None
+
+
+def monitor_once(client: XueQiuClient, notifier: Notifier) -> bool:
+    """检查一轮。返回 True 表示 Cookie 已失效，调用方应退出。"""
     state = _load_state()
     state_changed = False
 
-    # Token 过期检查（仅首次检测到即将过期时发通知）
     if _check_token_expiry(state, notifier):
         state_changed = True
+    expiry = _get_token_expiry(XUEQIU_COOKIE)
+    if expiry is not None and expiry <= time.time():
+        _stop_for_cookie(state, notifier, "Cookie 已到过期时间")
+        return True
 
     for cube_id in MONITORED_CUBES:
         logger.info(f"─── 检查组合 {cube_id} ───")
         try:
-            # 获取当前持仓
-            client.portfolio_id = cube_id  # 切换组合
+            client.portfolio_id = cube_id
             new_positions = client.get_current_positions()
             logger.info(f"持仓数量: {len(new_positions)} 只")
 
-            if not new_positions:
-                logger.warning(f"[{cube_id}] 持仓列表为空，可能 Cookie 失效或组合不存在")
+            if not client.last_fetch_ok:
+                logger.error(f"[{cube_id}] 没有拿到持仓数据，保留旧快照")
+                continue
 
-            # 获取最新调仓记录（含组合名称和调仓ID）
+            if not new_positions:
+                logger.warning(f"[{cube_id}] 持仓列表为空，可能组合不存在或没有公开持仓")
+
             latest_rb = client.get_latest_rebalancing()
             nav_info = parse_nav_from_rebalancing(latest_rb)
             if not nav_info.get("name"):
                 nav_info["name"] = cube_id
             logger.info(f"组合名称: {nav_info['name']}")
 
-            # ── 防重复推送：对比调仓记录 ID ──────────────────────────────
             rb_id = latest_rb.get("id") if latest_rb else None
             last_rb_id = state.get(cube_id, {}).get("last_rb_id")
 
             if rb_id and rb_id == last_rb_id:
                 logger.info(f"[{cube_id}] 调仓记录未变化（ID={rb_id}），跳过通知")
-                # 仅更新检查时间，不改变持仓快照
                 if cube_id in state:
                     state[cube_id]["last_check"] = datetime.now().isoformat()
                     state_changed = True
@@ -542,9 +577,7 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
 
             if rb_id:
                 logger.info(f"[{cube_id}] 发现新调仓记录（ID={rb_id}，上次={last_rb_id}）")
-            # ─────────────────────────────────────────────────────────────
 
-            # 对比变动
             old_positions = state.get(cube_id, {}).get("positions", [])
             changes = detect_changes(old_positions, new_positions)
 
@@ -554,28 +587,28 @@ def monitor_once(client: XueQiuClient, notifier: DingTalkNotifier):
                 ok = notifier.send_markdown(title, content, cube_id=cube_id)
                 if ok:
                     logger.info(f"[{cube_id}] 通知发送成功")
-                    # 推送成功 → 更新完整状态（含新 rb_id）
                     _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                     state_changed = True
                 else:
                     logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
-                    # 推送失败 → 不更新状态，下次重试
             else:
                 logger.info(f"[{cube_id}] 无持仓变动（阈值 {WEIGHT_CHANGE_THRESHOLD}%）")
-                # 无变动 → 更新快照和 rb_id（避免下次重复对比）
                 _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                 state_changed = True
 
+        except CookieExpired as exc:
+            _stop_for_cookie(state, notifier, str(exc))
+            return True
         except Exception as e:
             logger.error(f"[{cube_id}] 异常: {e}")
             logger.debug(traceback.format_exc())
-            # 发送错误通知（避免静默失败）
             notifier.send_text(f"⚠️ 雪球监控异常\n组合：{cube_id}\n错误：{e}")
 
-        time.sleep(2)  # 避免请求过快
+        time.sleep(2)
 
     if state_changed:
         _save_state(state)
+    return False
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -586,10 +619,7 @@ def _check_config() -> bool:
     """检查配置完整性，有问题直接打印并返回 False"""
     ok = True
     if "你的token" in XUEQIU_COOKIE or not XUEQIU_COOKIE:
-        print("❌ 未配置雪球 Cookie！请在 .env 文件或脚本顶部填写 XUEQIU_COOKIE")
-        ok = False
-    if "你的access_token" in DINGTALK_WEBHOOK or not DINGTALK_WEBHOOK:
-        print("❌ 未配置钉钉 Webhook！请在 .env 文件或脚本顶部填写 DINGTALK_WEBHOOK")
+        print("❌ 未配置雪球 Cookie！请运行：uv run python login.py")
         ok = False
     if not MONITORED_CUBES or MONITORED_CUBES == ["ZH123456"]:
         print("❌ 未配置监控组合！请在 .env 文件或脚本顶部填写 MONITORED_CUBES")
@@ -603,38 +633,59 @@ def _check_config() -> bool:
 
 def main():
     print("=" * 60)
-    print("  雪球组合变动监控 v2.1  ·  钉钉通知")
+    print("  雪球组合变动监控 v2.1")
     print("=" * 60)
 
-    if not _check_config():
+    config_ok = _check_config()
+    notifier, notify_errors = build_notifier()
+    for err in notify_errors:
+        print(f"❌ {err}")
+    if not config_ok or notify_errors:
         print("\n💡 配置方式（推荐使用 .env 文件）：")
         print("   在脚本同目录创建 .env 文件，内容：")
         print("     XUEQIU_COOKIE=xq_a_token=xxx;u=xxx")
-        print("     DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx")
         print("     MONITORED_CUBES=ZH123456,ZH654321")
+        print("     DINGTALK_ENABLED=true")
+        print("     DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx")
+        print("     TELEGRAM_ENABLED=true")
+        print("     TELEGRAM_BOT_TOKEN=123456:abc")
+        print("     TELEGRAM_CHAT_ID=123456789")
+        print("     FEISHU_ENABLED=true")
+        print("     FEISHU_APP_ID=cli_xxx")
+        print("     FEISHU_APP_SECRET=xxx")
+        print("     FEISHU_MODE=websocket")
+        print("     FEISHU_RECEIVE_ID=oc_xxx")
         print("     CHECK_INTERVAL=300")
         sys.exit(1)
 
     print(f"\n📌 监控组合: {', '.join(MONITORED_CUBES)}")
     print(f"⏱  检查间隔: {CHECK_INTERVAL} 秒")
     print(f"📊 仓位变动阈值: ≥ {WEIGHT_CHANGE_THRESHOLD}%")
+    print(f"📤 通知渠道: {notifier.describe()}")
     print(f"📅 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    if _cookie_already_failed(_load_state()):
+        state = _load_state()
+        token_state = state.get("_token") or {}
+        if token_state.get("notify_pending"):
+            _stop_for_cookie(state, notifier, "Cookie 已失效")
+        logger.critical("该 Cookie 已确认失效，不再请求雪球。更新 Cookie 后重启。")
+        sys.exit(2)
 
     # 初始化客户端（cookie 全局复用，portfolio_id 每次切换）
     client = XueQiuClient(XUEQIU_COOKIE, MONITORED_CUBES[0])
-    notifier = DingTalkNotifier(DINGTALK_WEBHOOK)
 
-    # 启动时立即执行一次
     logger.info("首次检查...")
-    monitor_once(client, notifier)
+    if monitor_once(client, notifier):
+        sys.exit(2)
 
-    # 定时循环
     try:
         while True:
             next_run = datetime.now().strftime("%H:%M:%S")
             logger.info(f"等待 {CHECK_INTERVAL} 秒后再次检查（下次约 {next_run}）...")
             time.sleep(CHECK_INTERVAL)
-            monitor_once(client, notifier)
+            if monitor_once(client, notifier):
+                sys.exit(2)
     except KeyboardInterrupt:
         logger.info("监控已手动停止")
         print("\n👋 监控已停止")

@@ -1,0 +1,13 @@
+.git
+.venv
+.xueqiu-chrome
+.omc
+__pycache__
+*.py[cod]
+.env
+.env.*
+!.env.example
+monitor_state.json
+*.log
+k3s
+img
