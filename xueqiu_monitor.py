@@ -152,7 +152,7 @@ def _get_token_expiry(cookie: str) -> Optional[float]:
         ts = int(token.rsplit("_", 1)[1])
     except ValueError:
         return None
-    if ts > 1893456000000:  # 毫秒 → 秒
+    if ts > 1893456000:  # 超过秒级上限时按毫秒处理
         ts /= 1000
     if 1672531200 <= ts <= 1893456000:  # 2023 ~ 2030
         return float(ts)
