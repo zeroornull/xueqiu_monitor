@@ -68,8 +68,8 @@ MONITORED_CUBES: list[str] = (
 # 检查间隔（秒），默认 5 分钟
 CHECK_INTERVAL: int = int(os.environ.get("CHECK_INTERVAL", "300"))
 
-# 仓位权重变动阈值（百分点），超过此值才触发通知，默认 1%
-WEIGHT_CHANGE_THRESHOLD: float = float(os.environ.get("WEIGHT_CHANGE_THRESHOLD", "1.0"))
+# 仓位权重变动阈值（百分点）。0 表示只要仓位有变化就通知。
+WEIGHT_CHANGE_THRESHOLD: float = float(os.environ.get("WEIGHT_CHANGE_THRESHOLD", "0"))
 
 # 日志文件（空字符串=只输出到终端）
 LOG_FILE: str = os.environ.get("LOG_FILE", "xueqiu_monitor.log")
@@ -568,7 +568,7 @@ def detect_changes(old: list[dict], new: list[dict]) -> list[dict]:
             # 使用上次保存的 weight（而非 API 的 prev_weight）进行对比，防止重复触发
             old_w = old_map[sym].get("weight", 0)
             delta = curr_w - old_w
-            if abs(delta) >= WEIGHT_CHANGE_THRESHOLD:
+            if delta != 0 and abs(delta) >= WEIGHT_CHANGE_THRESHOLD:
                 changes.append({
                     "type": "加仓" if delta > 0 else "减仓",
                     "symbol": sym,
@@ -729,7 +729,7 @@ def monitor_once(client: XueQiuClient, notifier: Notifier) -> bool:
                     else:
                         logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
                 else:
-                    logger.info(f"[{cube_id}] 无持仓变动（阈值 {WEIGHT_CHANGE_THRESHOLD}%）")
+                    logger.info(f"[{cube_id}] 无持仓变动")
                     _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                     state_changed = True
 
@@ -799,7 +799,10 @@ def main():
 
     print(f"\n📌 监控组合: {', '.join(MONITORED_CUBES)}")
     print(f"⏱  检查间隔: {CHECK_INTERVAL} 秒")
-    print(f"📊 仓位变动阈值: ≥ {WEIGHT_CHANGE_THRESHOLD}%")
+    if WEIGHT_CHANGE_THRESHOLD <= 0:
+        print("📊 仓位变动: 有变化就通知")
+    else:
+        print(f"📊 仓位变动阈值: ≥ {WEIGHT_CHANGE_THRESHOLD}%")
     print(f"📤 通知渠道: {notifier.describe()}")
     print(f"📅 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 

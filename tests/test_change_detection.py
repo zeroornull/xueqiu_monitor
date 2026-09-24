@@ -101,8 +101,9 @@ class TestDetectChanges:
         assert changes[0]["old_weight"] == 15.0
         assert changes[0]["new_weight"] == 13.0
 
-    def test_change_below_threshold(self):
-        """低于阈值的变动应该被忽略（默认阈值 1.0%）"""
+    def test_change_below_threshold(self, monkeypatch):
+        """低于阈值的变动应该被忽略"""
+        monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 1.0)
         old = [
             {
                 "symbol": "SH600519",
@@ -124,8 +125,9 @@ class TestDetectChanges:
         changes = detect_changes(old, new)
         assert len(changes) == 0
 
-    def test_change_exactly_at_threshold(self):
+    def test_change_exactly_at_threshold(self, monkeypatch):
         """恰好等于阈值的变动应该被检测"""
+        monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 1.0)
         old = [
             {
                 "symbol": "SH600519",
@@ -144,6 +146,14 @@ class TestDetectChanges:
                 "price": 1690.0,
             }
         ]
+        changes = detect_changes(old, new)
+        assert len(changes) == 1
+        assert changes[0]["type"] == "加仓"
+
+    def test_tiny_change_notifies_when_threshold_is_zero(self, monkeypatch):
+        monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 0)
+        old = [{"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1.0}]
+        new = [{"symbol": "SH600519", "name": "贵州茅台", "weight": 10.2, "price": 1.0}]
         changes = detect_changes(old, new)
         assert len(changes) == 1
         assert changes[0]["type"] == "加仓"
