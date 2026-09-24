@@ -8,3 +8,4 @@ __pycache__/
 monitor_state.json
 *.log
 k3s/
+.codebase-memory

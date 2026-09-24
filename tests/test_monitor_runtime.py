@@ -1,5 +1,6 @@
 """监控运行时：状态、接口解析、过期处理和一轮检查。不请求雪球。"""
 
+import base64
 import json
 import sys
 import time
@@ -16,6 +17,7 @@ from xueqiu_monitor import (
     _check_config,
     _check_token_expiry,
     _cookie_already_failed,
+    _is_user_id_token,
     _load_state,
     _save_cube_state,
     _save_state,
@@ -24,6 +26,11 @@ from xueqiu_monitor import (
     monitor_once,
     parse_nav_from_rebalancing,
 )
+
+
+def _jwt(payload: dict) -> str:
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"h.{body}.s"
 
 
 def _response(status, payload=None, bad_json=False):
@@ -39,7 +46,9 @@ def _response(status, payload=None, bad_json=False):
 
 def _client(cookie="xq_a_token=abc;u=9;acw_tc=drop"):
     with patch.object(XueQiuClient, "_init_session"):
-        return XueQiuClient(cookie, "zh1")
+        client = XueQiuClient(cookie, "zh1")
+    client._init_session = lambda: None
+    return client
 
 
 class _Notifier:
@@ -60,7 +69,8 @@ class _Notifier:
 class TestAuthAndNav:
     def test_http_status(self):
         assert _auth_failure_reason(_response(401)) == "HTTP 401"
-        assert _auth_failure_reason(_response(403)) == "HTTP 403"
+        assert _auth_failure_reason(_response(403)) is None
+        assert _auth_failure_reason(_response(403, {"error_description": "请先登录"})) == "请先登录"
         assert _auth_failure_reason(_response(400, {"error_description": "参数错误"})) is None
 
     def test_login_required_body(self):
@@ -148,9 +158,20 @@ class TestStateAndCookie:
         assert state["_token"]["notify_pending"] is False
         _stop_for_cookie(state, note, "HTTP 401")
         assert len(note.markdown) == 3
+        assert "auth_failed" not in state["_token"]
 
 
 class TestClientParsing:
+    def test_waf_page_cannot_replace_user_token(self):
+        client = _client("xq_a_token=abc;u=9;xq_id_token=" + _jwt({"uid": 9, "exp": 1893456000}))
+        assert _is_user_id_token(client.session.cookies.get("xq_id_token"))
+        previous = client._auth_cookie_values()
+        client.session.cookies.set("xq_id_token", _jwt({"uid": -1, "exp": 1893456000}), domain=".xueqiu.com", path="/")
+        client.session.cookies.set("xq_is_login", "", domain=".xueqiu.com", path="/")
+        client._restore_user_cookies(previous)
+        assert client.session.cookies.get("xq_id_token") == previous["xq_id_token"]
+        assert _is_user_id_token(client.session.cookies.get("xq_id_token"))
+
     def test_keeps_only_auth_cookies(self):
         client = _client()
         names = {cookie.name for cookie in client.session.cookies}
@@ -208,6 +229,17 @@ class TestClientParsing:
             assert str(exc) == "HTTP 401"
         else:
             raise AssertionError("401 应该中断请求")
+
+    def test_waf_403_refreshes_and_retries(self):
+        client = _client()
+        client.session.cookies.set("acw_tc", "stale", domain="xueqiu.com", path="/")
+        ok = _response(200, {"last_rb": {"holdings": []}})
+        blocked = _response(403)
+        blocked.json.side_effect = ValueError("html")
+        client.session.get = MagicMock(side_effect=[blocked, ok])
+        with patch.object(client, "_refresh_waf", wraps=client._refresh_waf):
+            assert client._get("https://xueqiu.com/cubes/rebalancing/current.json") == {"last_rb": {"holdings": []}}
+        assert client.session.get.call_count == 2
 
     def test_get_returns_none_on_http_error(self):
         client = _client()
@@ -286,22 +318,62 @@ class TestMonitorOnce:
         client.get_latest_rebalancing.assert_not_called()
         assert _load_state()["ZH1"]["last_rb_id"] == 1
 
-    def test_cookie_expired_stops(self, monkeypatch, tmp_path):
+    def test_past_expiry_still_requests(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
         monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=abc_1735660800")
+        monkeypatch.setattr(xm, "_attempt_relogin", lambda client: "failed")
         client = _client()
-        client.get_current_positions = MagicMock()
+        client.get_current_positions = MagicMock(return_value=[])
+        client.last_fetch_ok = False
         note = _Notifier()
-        assert monitor_once(client, note) is True
-        client.get_current_positions.assert_not_called()
-        assert note.markdown[0][0] == "雪球 Cookie 已失效"
+        assert monitor_once(client, note) is False
+        client.get_current_positions.assert_called_once()
+        assert note.markdown == []
 
-    def test_auth_error_during_fetch_stops(self, monkeypatch, tmp_path):
+    def test_auth_error_keeps_running(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(xm, "_attempt_relogin", lambda client: "unavailable")
         client = _client()
         client.get_current_positions = MagicMock(side_effect=CookieExpired("HTTP 403"))
         note = _Notifier()
-        assert monitor_once(client, note) is True
+        assert monitor_once(client, note) is False
+        assert note.markdown[0][0] == "雪球请求被拒绝"
+        assert "30 天" in note.markdown[0][1]
+        assert monitor_once(client, note) is False
+        assert len(note.markdown) == 1
+        assert "auth_failed" not in _load_state().get("_token", {})
+
+    def test_relogin_retries_fetch(self, monkeypatch, tmp_path):
+        self._patch_common(monkeypatch, tmp_path)
+        client = _client()
+        calls = {"n": 0}
+
+        def positions():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise CookieExpired("HTTP 401")
+            client.last_fetch_ok = True
+            return []
+
+        def relogin(target):
+            xm.XUEQIU_COOKIE = "xq_a_token=fresh;u=2"
+            return "ok"
+
+        monkeypatch.setattr(xm, "_attempt_relogin", relogin)
+        client.get_current_positions = positions
+        client.get_latest_rebalancing = MagicMock(return_value={"id": 1, "cube_name": "组合"})
+        note = _Notifier()
+        assert monitor_once(client, note) is False
+        assert calls["n"] == 2
+        assert note.markdown == []
+
+    def test_auth_error_during_fetch_keeps_running(self, monkeypatch, tmp_path):
+        self._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(xm, "_attempt_relogin", lambda client: "failed")
+        client = _client()
+        client.get_current_positions = MagicMock(side_effect=CookieExpired("HTTP 403"))
+        note = _Notifier()
+        assert monitor_once(client, note) is False
         assert "HTTP 403" in note.markdown[0][1]
 
     def test_unexpected_error_sends_text(self, monkeypatch, tmp_path):

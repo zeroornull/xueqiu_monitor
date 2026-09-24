@@ -96,6 +96,7 @@ _BASE_URL   = "https://xueqiu.com"
 _STOCK_BASE = "https://stock.xueqiu.com"
 # 只带登录态。浏览器里的 acw_tc、ssxmod_itna 绑在原浏览器上，重放会得到 400/403。
 _AUTH_COOKIE_NAMES = ("xq_a_token", "u", "xq_id_token", "xq_r_token", "xqat", "xq_is_login")
+_WAF_COOKIE_NAMES = ("acw_tc", "acw_sc__v2", "ssxmod_itna", "ssxmod_itna2")
 
 
 class CookieExpired(Exception):
@@ -119,8 +120,8 @@ def _cookie_already_failed(state: dict) -> bool:
     return bool(token_state.get("auth_failed") and token_state.get("hash") == _cookie_hash())
 
 
-def _jwt_expiry(token: str) -> Optional[float]:
-    """读取 JWT 的 exp，不校验签名。xq_id_token 用这个字段表示过期时间。"""
+def _jwt_payload(token: str) -> Optional[dict]:
+    """读取 JWT 载荷，不校验签名。"""
     parts = token.split(".")
     if len(parts) < 2:
         return None
@@ -129,10 +130,24 @@ def _jwt_expiry(token: str) -> Optional[float]:
         data = json.loads(base64.urlsafe_b64decode(payload))
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
-    exp = data.get("exp") if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
+
+
+def _jwt_expiry(token: str) -> Optional[float]:
+    """读取 JWT 的 exp。xq_id_token 用这个字段表示过期时间。"""
+    data = _jwt_payload(token)
+    exp = data.get("exp") if data else None
     if isinstance(exp, (int, float)) and exp > 1_000_000_000:
         return float(exp)
     return None
+
+
+def _is_user_id_token(token: Optional[str]) -> bool:
+    """登录用户的 xq_id_token 中 uid 为正数。首页和风控页下发的是 uid=-1 的游客票。"""
+    if not token:
+        return False
+    uid = (_jwt_payload(token) or {}).get("uid")
+    return isinstance(uid, int) and not isinstance(uid, bool) and uid > 0
 
 
 def _get_token_expiry(cookie: str) -> Optional[float]:
@@ -191,22 +206,90 @@ def _check_token_expiry(state: dict, notifier: Notifier) -> bool:
     return True
 
 
+def _install_cookie(client, header: str) -> None:
+    global XUEQIU_COOKIE
+    from login import _ENV_PATH, upsert_env
+
+    upsert_env(_ENV_PATH, "XUEQIU_COOKIE", header)
+    XUEQIU_COOKIE = header
+    client.replace_auth_cookie(header)
+
+
+def _profile_cookie() -> str | None:
+    try:
+        from login import _PROFILE_DIR, profile_cookie_header
+    except ImportError:
+        return None
+    return profile_cookie_header(_PROFILE_DIR)
+
+
+def _adopt_profile_cookie(client) -> bool:
+    """Chrome 配置里有更新的登录票时直接换上，不打开窗口。"""
+    header = _profile_cookie()
+    if not header or header == XUEQIU_COOKIE:
+        return False
+    new_expiry = _get_token_expiry(header) or 0
+    old_expiry = _get_token_expiry(XUEQIU_COOKIE) or 0
+    if old_expiry and new_expiry <= old_expiry:
+        return False
+    _install_cookie(client, header)
+    logger.info("已从本机 Chrome 配置读取登录 Cookie")
+    return True
+
+
+def _attempt_relogin(client) -> str:
+    """ok / sms / failed / unavailable。成功时写回 .env 并换上新 Cookie。"""
+    if _adopt_profile_cookie(client):
+        return "ok"
+    try:
+        from login import acquire_cookie
+    except ImportError:
+        logger.error("无法自动登录：当前环境没有 login.py")
+        return "unavailable"
+    logger.warning("Chrome 配置里没有更新的登录态，尝试打开浏览器重新登录")
+    result = acquire_cookie(interactive=False, current=XUEQIU_COOKIE)
+    if result.status == "ok" and result.cookie and result.cookie != XUEQIU_COOKIE:
+        _install_cookie(client, result.cookie)
+        logger.info("重新登录成功，已更新 Cookie")
+        return "ok"
+    if result.status == "sms":
+        logger.error("自动登录遇到短信验证，已放弃")
+        return "sms"
+    logger.error(f"自动重新登录未成功：{result.message or result.status}")
+    return "failed" if result.status != "unavailable" else "unavailable"
+
+
+def _fail_cookie(state: dict, notifier: Notifier, client, reason: str) -> bool:
+    """本机若能换到更新的登录票就立刻重试。换不到也继续按间隔请求，不退出。"""
+    if not client.relogin_tried:
+        client.relogin_tried = True
+        if _attempt_relogin(client) == "ok":
+            return True
+    _stop_for_cookie(state, notifier, reason)
+    return False
+
+
 def _stop_for_cookie(state: dict, notifier: Notifier, reason: str) -> None:
-    """通知一次并记下失效。调用方随后退出，不再请求雪球。"""
+    """通知一次。进程继续按间隔请求，不把这份 Cookie 判死。"""
     token_state = _token_state(state)
-    logger.critical(f"雪球 Cookie 已失效，停止请求：{reason}")
-    if not token_state.get("auth_failed") or token_state.get("notify_pending"):
-        content = (
-            f"## ⚠️ 雪球 Cookie 已失效\n\n"
-            f"> 原因：{reason}\n\n"
-            f"监控已停止请求雪球，持仓快照保持不变。\n\n"
-            f"{_cookie_renew_hint()}"
-        )
-        token_state["auth_failed"] = True
-        token_state["auth_failed_at"] = datetime.now().isoformat()
-        token_state["notify_pending"] = not notifier.send_markdown("雪球 Cookie 已失效", content)
-        if token_state["notify_pending"]:
-            logger.error("Cookie 失效通知发送失败，下次启动会再试一次，期间不再请求雪球")
+    expiry = _get_token_expiry(XUEQIU_COOKIE)
+    until = ""
+    if expiry:
+        until = f"\n> 登录票标注到期：**{datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M')}**"
+    logger.warning(f"雪球请求被拒绝，下一轮继续：{reason}")
+    if token_state.get("auth_notified") and not token_state.get("notify_pending"):
+        return
+    content = (
+        f"## ⚠️ 雪球请求被拒绝\n\n"
+        f"> 原因：{reason}{until}\n\n"
+        f"监控保持运行，按检查间隔继续请求。\n"
+        f"这份登录票由雪球签发，有效期大约 30 天，到期前不用重新登录。\n"
+    )
+    sent = notifier.send_markdown("雪球请求被拒绝", content)
+    token_state["auth_notified"] = bool(sent)
+    token_state["notify_pending"] = not sent
+    if not sent:
+        logger.error("请求失败通知没发出去，下一轮再试一次")
     _save_state(state)
 
 
@@ -234,8 +317,30 @@ class XueQiuClient:
         })
         self._init_session()
         self._apply_auth_cookies(cookie)
+        self.login_cookie = cookie
         self.last_fetch_ok = False
+        self.relogin_tried = False
         atexit.register(self.session.close)
+
+    def _auth_cookie_values(self) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for name in _AUTH_COOKIE_NAMES:
+            value = self.session.cookies.get(name)
+            if value:
+                found[name] = value
+        return found
+
+    def _restore_user_cookies(self, previous: dict[str, str]) -> None:
+        """风控页会用游客票覆盖登录态。已有用户票时丢掉这次下发的游客票。"""
+        if not _is_user_id_token(previous.get("xq_id_token")):
+            return
+        if _is_user_id_token(self.session.cookies.get("xq_id_token")):
+            return
+        for cookie in list(self.session.cookies):
+            if cookie.name in _AUTH_COOKIE_NAMES:
+                self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        for name, value in previous.items():
+            self.session.cookies.set(name, value, domain=".xueqiu.com", path="/")
 
     def _apply_auth_cookies(self, cookie: str) -> None:
         parsed: dict[str, str] = {}
@@ -249,6 +354,11 @@ class XueQiuClient:
             if parsed.get(name):
                 self.session.cookies.set(name, parsed[name], domain=".xueqiu.com", path="/")
 
+    def replace_auth_cookie(self, cookie: str) -> None:
+        self.session.cookies.clear()
+        self._init_session()
+        self._apply_auth_cookies(cookie)
+
     def _init_session(self):
         """先访问首页，让雪球下发新的风控 Cookie，再附上登录态。"""
         try:
@@ -256,12 +366,31 @@ class XueQiuClient:
         except Exception as e:
             logger.warning(f"session 初始化失败 ({e})，继续运行")
 
-    def _get(self, url: str, params: dict = None) -> Optional[dict]:
+    def _refresh_waf(self) -> None:
+        """acw_tc 大约 30 分钟过期。只换风控 Cookie，登录票用回 Secret 里的那份。"""
+        for cookie in list(self.session.cookies):
+            if cookie.name in _WAF_COOKIE_NAMES:
+                self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        self._init_session()
+        self._apply_auth_cookies(self.login_cookie)
+
+    def _get(self, url: str, params: dict = None, *, retried: bool = False) -> Optional[dict]:
+        if not self.session.cookies.get("acw_tc"):
+            self._refresh_waf()
+        previous = self._auth_cookie_values()
         try:
             resp = self.session.get(url, params=params, timeout=15)
         except Exception as e:
             logger.error(f"请求异常: {url} -> {e}")
             return None
+        self._restore_user_cookies(previous)
+        if resp.status_code == 403 and not _explicit_login_failure(resp):
+            if retried:
+                logger.error(f"刷新风控 Cookie 后仍然 HTTP 403: {url}")
+                return None
+            logger.warning(f"HTTP 403，刷新风控 Cookie 后重试: {url}")
+            self._refresh_waf()
+            return self._get(url, params, retried=True)
         reason = _auth_failure_reason(resp)
         if reason:
             logger.error(f"HTTP {resp.status_code}: {url}")
@@ -516,20 +645,30 @@ def build_markdown(cube_id: str, nav_info: dict, changes: list[dict]) -> tuple[s
 #  🔄  单次监控执行
 # ══════════════════════════════════════════════════════════════════
 
-def _auth_failure_reason(resp: requests.Response) -> Optional[str]:
-    """401/403，或响应明确要求登录时，视为 Cookie 失效。普通 400 不在此列。"""
-    if resp.status_code in (401, 403):
-        return f"HTTP {resp.status_code}"
+def _explicit_login_failure(resp: requests.Response) -> bool:
     try:
         data = resp.json()
     except Exception:
-        return None
+        return False
     if not isinstance(data, dict):
-        return None
+        return False
     description = str(data.get("error_description") or "")
     code = str(data.get("error_code") or "")
-    if code in {"10022", "400016"} or any(word in description for word in ("登录", "cookie", "Cookie")):
-        return description[:80] or f"error_code {code}"
+    return code in {"10022", "400016"} or any(word in description for word in ("登录", "cookie", "Cookie"))
+
+
+def _auth_failure_reason(resp: requests.Response) -> Optional[str]:
+    """401，或响应明确要求登录。单纯的 HTTP 403 是风控页，不是登录票失效。"""
+    if resp.status_code == 401:
+        return "HTTP 401"
+    if _explicit_login_failure(resp):
+        try:
+            data = resp.json()
+        except Exception:
+            return "需要登录"
+        description = str(data.get("error_description") or "")
+        code = str(data.get("error_code") or "")
+        return description[:80] or f"error_code {code}" or "需要登录"
     return None
 
 
@@ -537,74 +676,74 @@ def monitor_once(client: XueQiuClient, notifier: Notifier) -> bool:
     """检查一轮。返回 True 表示 Cookie 已失效，调用方应退出。"""
     state = _load_state()
     state_changed = False
+    client.relogin_tried = False
 
     if _check_token_expiry(state, notifier):
         state_changed = True
-    expiry = _get_token_expiry(XUEQIU_COOKIE)
-    if expiry is not None and expiry <= time.time():
-        _stop_for_cookie(state, notifier, "Cookie 已到过期时间")
-        return True
 
     for cube_id in MONITORED_CUBES:
         logger.info(f"─── 检查组合 {cube_id} ───")
-        try:
-            client.portfolio_id = cube_id
-            new_positions = client.get_current_positions()
-            logger.info(f"持仓数量: {len(new_positions)} 只")
+        while True:
+            try:
+                client.portfolio_id = cube_id
+                new_positions = client.get_current_positions()
+                logger.info(f"持仓数量: {len(new_positions)} 只")
 
-            if not client.last_fetch_ok:
-                logger.error(f"[{cube_id}] 没有拿到持仓数据，保留旧快照")
-                continue
+                if not client.last_fetch_ok:
+                    logger.error(f"[{cube_id}] 没有拿到持仓数据，保留旧快照")
+                    break
 
-            if not new_positions:
-                logger.warning(f"[{cube_id}] 持仓列表为空，可能组合不存在或没有公开持仓")
+                if not new_positions:
+                    logger.warning(f"[{cube_id}] 持仓列表为空，可能组合不存在或没有公开持仓")
 
-            latest_rb = client.get_latest_rebalancing()
-            nav_info = parse_nav_from_rebalancing(latest_rb)
-            if not nav_info.get("name"):
-                nav_info["name"] = cube_id
-            logger.info(f"组合名称: {nav_info['name']}")
+                latest_rb = client.get_latest_rebalancing()
+                nav_info = parse_nav_from_rebalancing(latest_rb)
+                if not nav_info.get("name"):
+                    nav_info["name"] = cube_id
+                logger.info(f"组合名称: {nav_info['name']}")
 
-            rb_id = latest_rb.get("id") if latest_rb else None
-            last_rb_id = state.get(cube_id, {}).get("last_rb_id")
+                rb_id = latest_rb.get("id") if latest_rb else None
+                last_rb_id = state.get(cube_id, {}).get("last_rb_id")
 
-            if rb_id and rb_id == last_rb_id:
-                logger.info(f"[{cube_id}] 调仓记录未变化（ID={rb_id}），跳过通知")
-                if cube_id in state:
-                    state[cube_id]["last_check"] = datetime.now().isoformat()
-                    state_changed = True
-                continue
+                if rb_id and rb_id == last_rb_id:
+                    logger.info(f"[{cube_id}] 调仓记录未变化（ID={rb_id}），跳过通知")
+                    if cube_id in state:
+                        state[cube_id]["last_check"] = datetime.now().isoformat()
+                        state_changed = True
+                    break
 
-            if rb_id:
-                logger.info(f"[{cube_id}] 发现新调仓记录（ID={rb_id}，上次={last_rb_id}）")
+                if rb_id:
+                    logger.info(f"[{cube_id}] 发现新调仓记录（ID={rb_id}，上次={last_rb_id}）")
 
-            old_positions = state.get(cube_id, {}).get("positions", [])
-            changes = detect_changes(old_positions, new_positions)
+                old_positions = state.get(cube_id, {}).get("positions", [])
+                changes = detect_changes(old_positions, new_positions)
 
-            if changes:
-                logger.info(f"[{cube_id}] 检测到 {len(changes)} 项变动，准备发送通知")
-                title, content = build_markdown(cube_id, nav_info, changes)
-                ok = notifier.send_markdown(title, content, cube_id=cube_id)
-                if ok:
-                    logger.info(f"[{cube_id}] 通知发送成功")
+                if changes:
+                    logger.info(f"[{cube_id}] 检测到 {len(changes)} 项变动，准备发送通知")
+                    title, content = build_markdown(cube_id, nav_info, changes)
+                    ok = notifier.send_markdown(title, content, cube_id=cube_id)
+                    if ok:
+                        logger.info(f"[{cube_id}] 通知发送成功")
+                        _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
+                        state_changed = True
+                    else:
+                        logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
+                else:
+                    logger.info(f"[{cube_id}] 无持仓变动（阈值 {WEIGHT_CHANGE_THRESHOLD}%）")
                     _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                     state_changed = True
-                else:
-                    logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
-            else:
-                logger.info(f"[{cube_id}] 无持仓变动（阈值 {WEIGHT_CHANGE_THRESHOLD}%）")
-                _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
-                state_changed = True
 
-        except CookieExpired as exc:
-            _stop_for_cookie(state, notifier, str(exc))
-            return True
-        except Exception as e:
-            logger.error(f"[{cube_id}] 异常: {e}")
-            logger.debug(traceback.format_exc())
-            notifier.send_text(f"⚠️ 雪球监控异常\n组合：{cube_id}\n错误：{e}")
+            except CookieExpired as exc:
+                if _fail_cookie(state, notifier, client, str(exc)):
+                    continue
+                return False
+            except Exception as e:
+                logger.error(f"[{cube_id}] 异常: {e}")
+                logger.debug(traceback.format_exc())
+                notifier.send_text(f"⚠️ 雪球监控异常\n组合：{cube_id}\n错误：{e}")
 
-        time.sleep(2)
+            time.sleep(2)
+            break
 
     if state_changed:
         _save_state(state)
@@ -663,14 +802,6 @@ def main():
     print(f"📊 仓位变动阈值: ≥ {WEIGHT_CHANGE_THRESHOLD}%")
     print(f"📤 通知渠道: {notifier.describe()}")
     print(f"📅 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-    if _cookie_already_failed(_load_state()):
-        state = _load_state()
-        token_state = state.get("_token") or {}
-        if token_state.get("notify_pending"):
-            _stop_for_cookie(state, notifier, "Cookie 已失效")
-        logger.critical("该 Cookie 已确认失效，不再请求雪球。更新 Cookie 后重启。")
-        sys.exit(2)
 
     # 初始化客户端（cookie 全局复用，portfolio_id 每次切换）
     client = XueQiuClient(XUEQIU_COOKIE, MONITORED_CUBES[0])
