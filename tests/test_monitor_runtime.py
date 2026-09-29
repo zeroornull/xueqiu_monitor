@@ -269,7 +269,16 @@ class TestMonitorOnce:
         client = _client()
         client.get_current_positions = MagicMock(return_value=positions)
         client.last_fetch_ok = True
-        client.get_latest_rebalancing = MagicMock(return_value={"id": 1, "cube_name": "组合"})
+        client.get_rebalancing_history = MagicMock(return_value=[{
+            "id": 1,
+            "cube_name": "组合",
+            "rebalancing_histories": [{
+                "stock_symbol": "SH600519",
+                "stock_name": "贵州茅台",
+                "proactive": True,
+                "target_weight": 10.0,
+            }],
+        }])
         note = _Notifier()
         assert monitor_once(client, note) is False
         assert note.markdown == []
@@ -282,18 +291,60 @@ class TestMonitorOnce:
         old = [{"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1.0}]
         _save_state({"ZH1": {"positions": old, "last_rb_id": 1, "nav": {"name": "组合"}}})
         client = _client()
-        new = [{"symbol": "SH600519", "name": "贵州茅台", "weight": 12.0, "price": 1.0}]
+        new = [
+            {"symbol": "SH600519", "name": "贵州茅台", "weight": 12.4, "price": 1.0},
+            {"symbol": "SH513120", "name": "港股创新药ETF广发", "weight": 2.06, "price": 1.0},
+        ]
         client.get_current_positions = MagicMock(return_value=new)
         client.last_fetch_ok = True
-        client.get_latest_rebalancing = MagicMock(return_value={"id": 2, "cube_name": "组合"})
+        record = {
+            "id": 2,
+            "status": "success",
+            "cube_name": "组合",
+            "rebalancing_histories": [{
+                "stock_symbol": "SH600519",
+                "stock_name": "贵州茅台",
+                "proactive": True,
+                "prev_weight_adjusted": 10.0,
+                "target_weight": 12.0,
+                "price": 1.0,
+            }],
+        }
+        client.get_rebalancing_history = MagicMock(return_value=[record])
         note = _Notifier()
         assert monitor_once(client, note) is False
         assert note.markdown[0][2] == "ZH1"
+        assert "贵州茅台" in note.markdown[0][1]
+        assert "港股创新药ETF广发" not in note.markdown[0][1]
         assert _load_state()["ZH1"]["last_rb_id"] == 2
 
-        client.get_latest_rebalancing = MagicMock(return_value={"id": 2, "cube_name": "组合"})
         assert monitor_once(client, note) is False
         assert len(note.markdown) == 1
+
+    def test_passive_rebalance_does_not_notify(self, monkeypatch, tmp_path):
+        self._patch_common(monkeypatch, tmp_path)
+        old = [{"symbol": "SH513120", "name": "港股创新药ETF广发", "weight": 2.0, "price": 1.0}]
+        _save_state({"ZH1": {"positions": old, "last_rb_id": 1, "nav": {"name": "组合"}}})
+        client = _client()
+        drifted = [{"symbol": "SH513120", "name": "港股创新药ETF广发", "weight": 2.06, "price": 1.0}]
+        client.get_current_positions = MagicMock(return_value=drifted)
+        client.last_fetch_ok = True
+        client.get_rebalancing_history = MagicMock(return_value=[{
+            "id": 2,
+            "status": "success",
+            "cube_name": "组合",
+            "rebalancing_histories": [{
+                "stock_symbol": "SH513120",
+                "stock_name": "港股创新药ETF广发",
+                "proactive": False,
+                "prev_weight_adjusted": 2.0,
+                "target_weight": 2.06,
+            }],
+        }])
+        note = _Notifier()
+        assert monitor_once(client, note) is False
+        assert note.markdown == []
+        assert _load_state()["ZH1"]["last_rb_id"] == 2
 
     def test_failed_notify_keeps_old_snapshot(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
@@ -302,7 +353,17 @@ class TestMonitorOnce:
         client = _client()
         client.get_current_positions = MagicMock(return_value=[])
         client.last_fetch_ok = True
-        client.get_latest_rebalancing = MagicMock(return_value={"id": 2})
+        client.get_rebalancing_history = MagicMock(return_value=[{
+            "id": 2,
+            "status": "success",
+            "rebalancing_histories": [{
+                "stock_symbol": "SH600519",
+                "stock_name": "贵州茅台",
+                "proactive": True,
+                "prev_weight_adjusted": 10.0,
+                "target_weight": 0,
+            }],
+        }])
         note = _Notifier(ok=False)
         assert monitor_once(client, note) is False
         assert _load_state()["ZH1"]["positions"] == old
@@ -313,9 +374,9 @@ class TestMonitorOnce:
         client = _client()
         client.get_current_positions = MagicMock(return_value=[])
         client.last_fetch_ok = False
-        client.get_latest_rebalancing = MagicMock()
+        client.get_rebalancing_history = MagicMock()
         assert monitor_once(client, _Notifier()) is False
-        client.get_latest_rebalancing.assert_not_called()
+        client.get_rebalancing_history.assert_not_called()
         assert _load_state()["ZH1"]["last_rb_id"] == 1
 
     def test_past_expiry_still_requests(self, monkeypatch, tmp_path):
@@ -361,7 +422,7 @@ class TestMonitorOnce:
 
         monkeypatch.setattr(xm, "_attempt_relogin", relogin)
         client.get_current_positions = positions
-        client.get_latest_rebalancing = MagicMock(return_value={"id": 1, "cube_name": "组合"})
+        client.get_rebalancing_history = MagicMock(return_value=[{"id": 1, "cube_name": "组合"}])
         note = _Notifier()
         assert monitor_once(client, note) is False
         assert calls["n"] == 2

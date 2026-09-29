@@ -5,7 +5,7 @@
 ──────────────────────────────────────
 功能：
   · 定时拉取雪球组合持仓数据
-  · 检测持仓新增/卖出/加减仓（按仓位权重对比）
+  · 检测持仓新增/卖出/加减仓（按调仓记录里的主动操作，不按实时市值权重）
   · 有变动时通过已启用的钉钉、Telegram 或飞书发送通知（也可以都不启用）
   · 记录上次调仓记录 ID，同一次调仓只推送一次（防重复）
 
@@ -469,15 +469,22 @@ class XueQiuClient:
         logger.info(f"[{self.portfolio_id}] 当前持仓 {len(positions)} 只 ({source})")
         return positions
 
-    def get_latest_rebalancing(self) -> Optional[dict]:
-        """获取最新调仓记录"""
+    def get_rebalancing_history(self, count: int = 20) -> Optional[list]:
+        """获取最近的调仓记录，新的在前。请求失败返回 None。"""
         data = self._get(
             f"{_BASE_URL}/cubes/rebalancing/history.json",
-            {"cube_symbol": self.portfolio_id, "count": 1, "page": 1}
+            {"cube_symbol": self.portfolio_id, "count": count, "page": 1},
         )
         if data is None:
             return None
-        records = data.get("list", [])
+        records = data.get("list") or []
+        return records if isinstance(records, list) else []
+
+    def get_latest_rebalancing(self) -> Optional[dict]:
+        """获取最新一条调仓记录"""
+        records = self.get_rebalancing_history(count=1)
+        if records is None:
+            return None
         return records[0] if records else None
 
 
@@ -524,71 +531,98 @@ def _save_cube_state(state: dict, cube_id: str, positions: list, nav_info: dict,
 
 
 def parse_nav_from_rebalancing(latest_rb: dict) -> dict[str, Any]:
-    """从调仓记录中解析组合名称"""
+    """从调仓记录中解析组合名称、调仓时间和类型"""
     if not latest_rb:
         return {"name": ""}
     data = latest_rb if isinstance(latest_rb, dict) else {}
-    histories = data.get("rebalancing_histories", [])
-    cube_name = (
-        histories[0].get("cube_name", "")
-        if histories else data.get("cube_name", "")
-    )
-    return {"name": cube_name}
+    histories = data.get("rebalancing_histories") or []
+    cube_name = ""
+    if histories and isinstance(histories[0], dict):
+        cube_name = histories[0].get("cube_name") or ""
+    if not cube_name:
+        cube_name = data.get("cube_name") or ""
+    info: dict[str, Any] = {"name": cube_name}
+    created = data.get("created_at")
+    if isinstance(created, (int, float)) and created > 0:
+        info["rebalanced_at"] = datetime.fromtimestamp(created / 1000).strftime("%m/%d %H:%M")
+    if data.get("category") == "sys_rebalancing":
+        info["rb_kind"] = "系统调仓"
+    elif data.get("category") == "user_rebalancing":
+        info["rb_kind"] = "调仓"
+    return info
 
 
 # ══════════════════════════════════════════════════════════════════
 #  🔔  变动检测
 # ══════════════════════════════════════════════════════════════════
 
-def detect_changes(old: list[dict], new: list[dict]) -> list[dict]:
-    """
-    对比新旧持仓，以上次保存的 weight 为基准检测变动（而非 prev_weight）。
-    这样可避免同一次调仓被多轮检查重复触发。
+def _optional_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    return float(value)
 
-    返回变动列表，每项格式：
-    {'type': '新增'/'卖出'/'加仓'/'减仓', 'symbol': ..., 'name': ...,
-     'old_weight': ..., 'new_weight': ..., 'price': ...}
+
+def _format_weight(value: float) -> str:
+    """一位小数能看清时用一位，否则保留两位，避免 0.03 显示成 0.0。"""
+    text = f"{value:.2f}"
+    if text.endswith("0"):
+        text = text[:-1]
+    return text
+
+
+def _format_delta(value: float) -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{_format_weight(value)}"
+
+
+def changes_from_rebalancing(record: Optional[dict]) -> list[dict]:
     """
-    old_map = {p["symbol"]: p for p in old}
-    new_map = {p["symbol"]: p for p in new}
+    从一条调仓记录提取主动操作。
+
+    行情漂移不在 rebalancing_histories 里，或 proactive 为 false。
+    比较的是调仓前实际仓位 prev_weight_adjusted 和目标仓位 target_weight。
+    """
+    if not record:
+        return []
     changes = []
-
-    for sym, pos in new_map.items():
-        curr_w = pos["weight"]
-        if sym not in old_map:
-            changes.append({
-                "type": "新增",
-                "symbol": sym,
-                "name": pos["name"],
-                "old_weight": 0,
-                "new_weight": curr_w,
-                "price": pos["price"],
-            })
+    for item in record.get("rebalancing_histories") or []:
+        if not isinstance(item, dict) or item.get("proactive") is False:
+            continue
+        symbol = str(item.get("stock_symbol") or item.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        name = item.get("stock_name") or item.get("name") or symbol
+        target = _optional_float(item.get("target_weight"))
+        if target is None:
+            target = _optional_float(item.get("weight"))
+        if target is None:
+            continue
+        baseline = _optional_float(item.get("prev_weight_adjusted"))
+        if baseline is None:
+            baseline = _optional_float(item.get("prev_weight"))
+        if baseline is None:
+            baseline = 0.0
+        price = _optional_float(item.get("price")) or 0.0
+        if target <= 0 and baseline > 0:
+            change_type = "卖出"
+            new_weight = 0.0
+        elif baseline <= 0 < target:
+            change_type = "新增"
+            new_weight = target
         else:
-            # 使用上次保存的 weight（而非 API 的 prev_weight）进行对比，防止重复触发
-            old_w = old_map[sym].get("weight", 0)
-            delta = curr_w - old_w
-            if delta != 0 and abs(delta) >= WEIGHT_CHANGE_THRESHOLD:
-                changes.append({
-                    "type": "加仓" if delta > 0 else "减仓",
-                    "symbol": sym,
-                    "name": pos["name"],
-                    "old_weight": old_w,
-                    "new_weight": curr_w,
-                    "price": pos["price"],
-                })
-
-    for sym, pos in old_map.items():
-        if sym not in new_map:
-            changes.append({
-                "type": "卖出",
-                "symbol": sym,
-                "name": pos["name"],
-                "old_weight": pos.get("weight", 0),
-                "new_weight": 0,
-                "price": pos["price"],
-            })
-
+            delta = target - baseline
+            if delta == 0 or abs(delta) < WEIGHT_CHANGE_THRESHOLD:
+                continue
+            change_type = "加仓" if delta > 0 else "减仓"
+            new_weight = target
+        changes.append({
+            "type": change_type,
+            "symbol": symbol,
+            "name": name,
+            "old_weight": baseline,
+            "new_weight": new_weight,
+            "price": price,
+        })
     return changes
 
 
@@ -609,9 +643,14 @@ def build_markdown(cube_id: str, nav_info: dict, changes: list[dict]) -> tuple[s
 
     title = f"雪球组合变动 · {name}"
 
+    extra = ""
+    if nav_info.get("rb_kind"):
+        extra += f"　｜　{nav_info['rb_kind']}"
+    if nav_info.get("rebalanced_at"):
+        extra += f"　｜　调仓时间：{nav_info['rebalanced_at']}"
     lines = [
         f"## 📈 {name} 持仓变动",
-        f"> 组合代码：**{cube_id}**　｜　检测时间：{now}",
+        f"> 组合代码：**{cube_id}**　｜　检测时间：{now}{extra}",
         "",
         "### 📋 变动明细",
     ]
@@ -626,13 +665,13 @@ def build_markdown(cube_id: str, nav_info: dict, changes: list[dict]) -> tuple[s
         price = c["price"]
 
         if change_type == "新增":
-            detail = f"建仓 **{new_w:.1f}%**"
+            detail = f"建仓 **{_format_weight(new_w)}%**"
         elif change_type == "卖出":
-            detail = f"清仓（原仓位 {old_w:.1f}%）"
+            detail = f"清仓（原仓位 {_format_weight(old_w)}%）"
         elif change_type == "加仓":
-            detail = f"{old_w:.1f}% → **{new_w:.1f}%**（+{new_w - old_w:.1f}%）"
+            detail = f"{_format_weight(old_w)}% → **{_format_weight(new_w)}%**（{_format_delta(new_w - old_w)}%）"
         else:
-            detail = f"{old_w:.1f}% → **{new_w:.1f}%**（{new_w - old_w:.1f}%）"
+            detail = f"{_format_weight(old_w)}% → **{_format_weight(new_w)}%**（{_format_delta(new_w - old_w)}%）"
 
         price_str = f"  当前价 ¥{price:.2f}" if price else ""
         lines.append(f"- {emoji} **{change_type}** {n}（{sym}）：{detail}{price_str}")
@@ -696,42 +735,67 @@ def monitor_once(client: XueQiuClient, notifier: Notifier) -> bool:
                 if not new_positions:
                     logger.warning(f"[{cube_id}] 持仓列表为空，可能组合不存在或没有公开持仓")
 
-                latest_rb = client.get_latest_rebalancing()
+                records = client.get_rebalancing_history()
+                if records is None:
+                    logger.error(f"[{cube_id}] 没有拿到调仓记录，保留旧快照")
+                    break
+
+                latest_rb = records[0] if records else None
                 nav_info = parse_nav_from_rebalancing(latest_rb)
                 if not nav_info.get("name"):
                     nav_info["name"] = cube_id
                 logger.info(f"组合名称: {nav_info['name']}")
 
-                rb_id = latest_rb.get("id") if latest_rb else None
                 last_rb_id = state.get(cube_id, {}).get("last_rb_id")
+                latest_id = latest_rb.get("id") if latest_rb else None
+                if last_rb_id is None:
+                    logger.info(f"[{cube_id}] 首次记录调仓（ID={latest_id}），不补发历史调仓")
+                    _save_cube_state(state, cube_id, new_positions, nav_info, latest_id)
+                    state_changed = True
+                    break
 
-                if rb_id and rb_id == last_rb_id:
-                    logger.info(f"[{cube_id}] 调仓记录未变化（ID={rb_id}），跳过通知")
+                fresh = [
+                    record for record in records
+                    if isinstance(record, dict) and (record.get("id") or 0) > last_rb_id
+                ]
+                fresh.sort(key=lambda record: record["id"])
+                if not fresh:
+                    logger.info(f"[{cube_id}] 调仓记录未变化（ID={latest_id}），跳过通知")
                     if cube_id in state:
                         state[cube_id]["last_check"] = datetime.now().isoformat()
                         state_changed = True
                     break
 
-                if rb_id:
-                    logger.info(f"[{cube_id}] 发现新调仓记录（ID={rb_id}，上次={last_rb_id}）")
-
-                old_positions = state.get(cube_id, {}).get("positions", [])
-                changes = detect_changes(old_positions, new_positions)
-
-                if changes:
-                    logger.info(f"[{cube_id}] 检测到 {len(changes)} 项变动，准备发送通知")
-                    title, content = build_markdown(cube_id, nav_info, changes)
-                    ok = notifier.send_markdown(title, content, cube_id=cube_id)
-                    if ok:
-                        logger.info(f"[{cube_id}] 通知发送成功")
+                for record in fresh:
+                    rb_id = record.get("id")
+                    status = record.get("status")
+                    if status == "pending":
+                        logger.info(f"[{cube_id}] 调仓尚未成交（ID={rb_id}），下一轮再看")
+                        break
+                    if status not in (None, "success"):
+                        logger.info(f"[{cube_id}] 忽略状态为 {status} 的调仓（ID={rb_id}）")
                         _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
                         state_changed = True
+                        continue
+
+                    logger.info(f"[{cube_id}] 发现新调仓记录（ID={rb_id}，上次={last_rb_id}）")
+                    changes = changes_from_rebalancing(record)
+                    record_nav = parse_nav_from_rebalancing(record)
+                    if not record_nav.get("name"):
+                        record_nav["name"] = nav_info["name"]
+                    if changes:
+                        logger.info(f"[{cube_id}] 检测到 {len(changes)} 项主动调仓，准备发送通知")
+                        title, content = build_markdown(cube_id, record_nav, changes)
+                        ok = notifier.send_markdown(title, content, cube_id=cube_id)
+                        if not ok:
+                            logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
+                            break
+                        logger.info(f"[{cube_id}] 通知发送成功")
                     else:
-                        logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
-                else:
-                    logger.info(f"[{cube_id}] 无持仓变动")
-                    _save_cube_state(state, cube_id, new_positions, nav_info, rb_id)
+                        logger.info(f"[{cube_id}] 调仓记录没有主动仓位变化（ID={rb_id}）")
+                    _save_cube_state(state, cube_id, new_positions, record_nav, rb_id)
                     state_changed = True
+                    last_rb_id = rb_id
 
             except CookieExpired as exc:
                 if _fail_cookie(state, notifier, client, str(exc)):

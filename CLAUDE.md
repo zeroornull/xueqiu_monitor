@@ -81,12 +81,14 @@ ruff check
 **Deduplication strategy:**
 1. **Rebalancing ID tracking:** 每个组合记录 `last_rb_id`，同一次调仓只推送一次
 2. **60-second cooldown:** 每个组合每分钟最多推送一次（防止重启时重复）
-3. **Snapshot comparison:** 对比上次保存的 `weight`（非 API 的 `prev_weight`），避免因接口数据不变而重复触发
+3. **First sight baselines:** 没有 `last_rb_id` 时只记下当前最新调仓，不补发历史
 
-变动检测逻辑（`detect_changes`）:
-- **新增:** 上次快照不存在该 symbol
-- **卖出:** 新快照不存在该 symbol
-- **加仓/减仓:** `|new_weight - old_weight| >= WEIGHT_CHANGE_THRESHOLD`
+变动检测逻辑（`changes_from_rebalancing`）只看调仓记录的 `rebalancing_histories`，不比较 `current.json` 的实时市值权重：
+- `proactive: false` 的条目是行情漂移，忽略
+- 起点用 `prev_weight_adjusted`（没有则用 `prev_weight`），终点用 `target_weight`
+- **新增:** 起点为 0，目标仓位 > 0
+- **卖出:** 目标仓位为 0
+- **加仓/减仓:** `|target_weight - prev_weight_adjusted| >= WEIGHT_CHANGE_THRESHOLD`
 
 ### Notification Flow
 

@@ -1,242 +1,123 @@
-"""Tests for position change detection logic."""
+"""调仓记录里的主动操作才算变动，实时市值权重不算。"""
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from xueqiu_monitor import detect_changes
+from xueqiu_monitor import changes_from_rebalancing
 
 
-class TestDetectChanges:
-    """Test suite for detect_changes() deduplication logic."""
+def _item(**kwargs):
+    base = {
+        "stock_symbol": "SH600519",
+        "stock_name": "贵州茅台",
+        "proactive": True,
+        "price": 1680.0,
+    }
+    base.update(kwargs)
+    return base
 
+
+class TestChangesFromRebalancing:
     def test_new_position(self):
-        """新增持仓应该被检测为'新增'"""
-        old = []
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 0,
-                "price": 1680.0,
-            }
-        ]
-        changes = detect_changes(old, new)
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(prev_weight=None, prev_weight_adjusted=None, target_weight=1.0)]
+        })
         assert len(changes) == 1
         assert changes[0]["type"] == "新增"
-        assert changes[0]["symbol"] == "SH600519"
         assert changes[0]["old_weight"] == 0
-        assert changes[0]["new_weight"] == 10.0
+        assert changes[0]["new_weight"] == 1.0
 
     def test_sold_position(self):
-        """清仓应该被检测为'卖出'"""
-        old = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 8.0,
-                "price": 1680.0,
-            }
-        ]
-        new = []
-        changes = detect_changes(old, new)
-        assert len(changes) == 1
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(prev_weight_adjusted=10.0, target_weight=0)]
+        })
         assert changes[0]["type"] == "卖出"
-        assert changes[0]["symbol"] == "SH600519"
         assert changes[0]["old_weight"] == 10.0
         assert changes[0]["new_weight"] == 0
 
-    def test_increase_above_threshold(self):
-        """超过阈值的加仓应该被检测"""
-        old = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 8.0,
-                "price": 1680.0,
-            }
-        ]
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 12.0,
-                "prev_weight": 10.0,
-                "price": 1700.0,
-            }
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 1
+    def test_increase_uses_adjusted_weight(self):
+        """调仓前已经随行情漂过的仓位，才是这次操作的起点。"""
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(
+                prev_weight=8.0,
+                prev_weight_adjusted=10.0,
+                target_weight=12.0,
+            )]
+        })
         assert changes[0]["type"] == "加仓"
         assert changes[0]["old_weight"] == 10.0
         assert changes[0]["new_weight"] == 12.0
 
-    def test_decrease_above_threshold(self):
-        """超过阈值的减仓应该被检测"""
-        old = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 15.0,
-                "prev_weight": 12.0,
-                "price": 1680.0,
-            }
-        ]
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 13.0,
-                "prev_weight": 15.0,
-                "price": 1650.0,
-            }
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 1
+    def test_decrease(self):
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(prev_weight_adjusted=3.97, target_weight=3.0)]
+        })
         assert changes[0]["type"] == "减仓"
-        assert changes[0]["old_weight"] == 15.0
-        assert changes[0]["new_weight"] == 13.0
+        assert changes[0]["old_weight"] == 3.97
+        assert changes[0]["new_weight"] == 3.0
 
-    def test_change_below_threshold(self, monkeypatch):
-        """低于阈值的变动应该被忽略"""
+    def test_below_threshold(self, monkeypatch):
         monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 1.0)
-        old = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 9.5,
-                "price": 1680.0,
-            }
-        ]
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.5,
-                "prev_weight": 10.0,
-                "price": 1690.0,
-            }
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 0
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(prev_weight_adjusted=10.0, target_weight=10.5)]
+        })
+        assert changes == []
 
-    def test_change_exactly_at_threshold(self, monkeypatch):
-        """恰好等于阈值的变动应该被检测"""
+    def test_exactly_at_threshold(self, monkeypatch):
         monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 1.0)
-        old = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 9.0,
-                "price": 1680.0,
-            }
-        ]
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 11.0,
-                "prev_weight": 10.0,
-                "price": 1690.0,
-            }
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 1
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(prev_weight_adjusted=10.0, target_weight=11.0)]
+        })
         assert changes[0]["type"] == "加仓"
 
-    def test_tiny_change_notifies_when_threshold_is_zero(self, monkeypatch):
+    def test_tiny_proactive_change_when_threshold_is_zero(self, monkeypatch):
         monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 0)
-        old = [{"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1.0}]
-        new = [{"symbol": "SH600519", "name": "贵州茅台", "weight": 10.2, "price": 1.0}]
-        changes = detect_changes(old, new)
-        assert len(changes) == 1
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(prev_weight_adjusted=2.94, target_weight=2.97)]
+        })
         assert changes[0]["type"] == "加仓"
+        assert round(changes[0]["new_weight"] - changes[0]["old_weight"], 2) == 0.03
 
-    def test_no_change(self):
-        """没有变动时应该返回空列表"""
-        old = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 10.0,
-                "price": 1680.0,
-            }
-        ]
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,
-                "prev_weight": 10.0,
-                "price": 1680.0,
-            }
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 0
+    def test_passive_item_is_ignored(self):
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(
+                proactive=False,
+                prev_weight_adjusted=2.0,
+                target_weight=2.06,
+            )]
+        })
+        assert changes == []
 
-    def test_multiple_changes(self):
-        """多个持仓同时变动应该全部检测到"""
-        old = [
-            {"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1680.0},
-            {"symbol": "SH600036", "name": "招商银行", "weight": 15.0, "price": 35.0},
-            {"symbol": "SZ000858", "name": "五粮液", "weight": 12.0, "price": 150.0},
-        ]
-        new = [
-            {"symbol": "SH600519", "name": "贵州茅台", "weight": 13.0, "price": 1700.0},  # 加仓
-            {"symbol": "SZ000858", "name": "五粮液", "weight": 10.0, "price": 145.0},  # 减仓
-            {"symbol": "SZ002594", "name": "比亚迪", "weight": 8.0, "price": 250.0},  # 新增
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 4  # 加仓 + 减仓 + 新增 + 卖出
+    def test_target_matches_adjusted_weight(self):
+        """目标仓位等于调仓前市值仓位，说明没有买卖。"""
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [_item(
+                prev_weight=8.0,
+                prev_weight_adjusted=10.0,
+                target_weight=10.0,
+            )]
+        })
+        assert changes == []
 
-        types = {c["symbol"]: c["type"] for c in changes}
-        assert types["SH600519"] == "加仓"
-        assert types["SZ000858"] == "减仓"
-        assert types["SZ002594"] == "新增"
-        assert types["SH600036"] == "卖出"
+    def test_multiple_active_changes(self):
+        changes = changes_from_rebalancing({
+            "rebalancing_histories": [
+                _item(stock_symbol="SH600585", stock_name="海螺水泥", prev_weight_adjusted=2.66, target_weight=3.0),
+                _item(stock_symbol="SH600970", stock_name="中材国际", prev_weight_adjusted=3.97, target_weight=3.0),
+                _item(stock_symbol="SZ002233", stock_name="塔牌集团", prev_weight=None, prev_weight_adjusted=None, target_weight=1.0),
+                _item(stock_symbol="SH513120", stock_name="港股创新药ETF广发", proactive=False, prev_weight_adjusted=2.0, target_weight=2.06),
+            ]
+        })
+        types = {item["symbol"]: item["type"] for item in changes}
+        assert types == {
+            "SH600585": "加仓",
+            "SH600970": "减仓",
+            "SZ002233": "新增",
+        }
 
-    def test_uses_saved_weight_not_prev_weight(self):
-        """
-        关键测试：detect_changes 应该使用上次保存的 weight，
-        而不是 API 返回的 prev_weight，以避免重复触发
-        """
-        # 上次保存的快照
-        old = [
-            {"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1680.0}
-        ]
-        # API 返回的新数据，prev_weight 可能和我们上次保存的不一致
-        new = [
-            {
-                "symbol": "SH600519",
-                "name": "贵州茅台",
-                "weight": 10.0,  # weight 没变
-                "prev_weight": 8.0,  # 但 prev_weight 显示之前是 8.0
-                "price": 1680.0,
-            }
-        ]
-        # 不应该检测到变动，因为 weight 10.0 -> 10.0
-        changes = detect_changes(old, new)
-        assert len(changes) == 0
-
-    def test_empty_positions(self):
-        """空持仓列表应该正常处理"""
-        changes = detect_changes([], [])
-        assert len(changes) == 0
-
-    def test_price_update_no_weight_change(self):
-        """价格变动但仓位不变时不应触发通知"""
-        old = [
-            {"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1680.0}
-        ]
-        new = [
-            {"symbol": "SH600519", "name": "贵州茅台", "weight": 10.0, "price": 1750.0}
-        ]
-        changes = detect_changes(old, new)
-        assert len(changes) == 0
+    def test_empty_record(self):
+        assert changes_from_rebalancing(None) == []
+        assert changes_from_rebalancing({}) == []
+        assert changes_from_rebalancing({"rebalancing_histories": []}) == []
