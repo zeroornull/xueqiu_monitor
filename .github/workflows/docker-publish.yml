@@ -1,0 +1,111 @@
+# Publish a multi-arch image to GitHub Container Registry.
+# This workflow is the only image build and publish path.
+#
+# The image runs the monitor process from the Dockerfile
+# (`python -m xueqiu_monitor`). Cookie and channel settings are runtime
+# environment only; this workflow does not bake secrets into the image.
+#
+# Login stays on your machine: `python -m xueqiu_monitor.login` opens a
+# browser and writes XUEQIU_COOKIE into .env. The container authenticates
+# with the cookie you pass in at runtime.
+#
+#   docker pull ghcr.io/zeroornull/xueqiu_monitor:latest
+#
+#   docker run -d --name xueqiu-monitor \
+#     --env-file .env \
+#     -v xueqiu-monitor-data:/data \
+#     ghcr.io/zeroornull/xueqiu_monitor:latest
+#
+# .env (or individual -e flags) must include:
+#   XUEQIU_COOKIE=xq_a_token=...;u=...
+#   MONITORED_CUBES=ZH123456
+#
+#   docker run -d --name xueqiu-monitor \
+#     -e XUEQIU_COOKIE='xq_a_token=...;u=...' \
+#     -e MONITORED_CUBES='ZH123456' \
+#     -v xueqiu-monitor-data:/data \
+#     ghcr.io/zeroornull/xueqiu_monitor:latest
+#
+# State is stored at /data/monitor_state.json. A fork publishes
+# ghcr.io/<owner>/xueqiu_monitor (lowercased). If the first pull is denied,
+# set the package visibility to public in GitHub Packages settings.
+#
+# Tags:
+#   push to main: :latest and :sha-<7-char>
+#   push of v*:   the version tag and :latest
+#   pull_request: build linux/amd64 + linux/arm64, do not push
+#   workflow_dispatch: :latest and :sha-<7-char> on main; :sha-<7-char> elsewhere
+
+name: Publish image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          # Multi-arch indexes are what GHCR serves; attach annotations there too.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # latest=auto adds :latest for the v* tag. Branch pushes opt in below.
+          flavor: |
+            latest=auto
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=ref,event=pr
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          # Multi-arch results cannot be loaded into the local Docker engine.
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha
+          cache-to: ${{ github.event_name == 'pull_request' && 'type=gha,mode=max,ignore-error=true' || 'type=gha,mode=max' }}

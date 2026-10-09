@@ -1,4 +1,4 @@
-"""用 .env 里的账号密码登录雪球，并把 Cookie 写回 .env。"""
+"""用 .env 里的账号密码登录雪球，并把 Cookie 写回 .env。只在本机执行。"""
 
 import base64
 import hashlib
@@ -12,8 +12,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-_ENV_PATH = Path(__file__).resolve().parent / ".env"
-_PROFILE_DIR = Path(__file__).resolve().parent / ".xueqiu-chrome"
+from xueqiu_monitor.config import PROJECT_ROOT
+
+_ENV_PATH = PROJECT_ROOT / ".env"
+_PROFILE_DIR = PROJECT_ROOT / ".xueqiu-chrome"
 _LOGIN_URL = "https://xueqiu.com/"
 _TIMEOUT_SECONDS = 300
 _AUTO_TIMEOUT_SECONDS = 45
@@ -273,5 +275,9 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> None:
     sys.exit(main())
+
+
+if __name__ == "__main__":
+    cli()

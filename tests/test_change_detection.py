@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from xueqiu_monitor import changes_from_rebalancing
+from xueqiu_monitor.changes import changes_from_rebalancing
 
 
 def _item(**kwargs):
@@ -59,21 +59,21 @@ class TestChangesFromRebalancing:
         assert changes[0]["new_weight"] == 3.0
 
     def test_below_threshold(self, monkeypatch):
-        monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 1.0)
+        monkeypatch.setattr("xueqiu_monitor.config.WEIGHT_CHANGE_THRESHOLD", 1.0)
         changes = changes_from_rebalancing({
             "rebalancing_histories": [_item(prev_weight_adjusted=10.0, target_weight=10.5)]
         })
         assert changes == []
 
     def test_exactly_at_threshold(self, monkeypatch):
-        monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 1.0)
+        monkeypatch.setattr("xueqiu_monitor.config.WEIGHT_CHANGE_THRESHOLD", 1.0)
         changes = changes_from_rebalancing({
             "rebalancing_histories": [_item(prev_weight_adjusted=10.0, target_weight=11.0)]
         })
         assert changes[0]["type"] == "加仓"
 
     def test_tiny_proactive_change_when_threshold_is_zero(self, monkeypatch):
-        monkeypatch.setattr("xueqiu_monitor.WEIGHT_CHANGE_THRESHOLD", 0)
+        monkeypatch.setattr("xueqiu_monitor.config.WEIGHT_CHANGE_THRESHOLD", 0)
         changes = changes_from_rebalancing({
             "rebalancing_histories": [_item(prev_weight_adjusted=2.94, target_weight=2.97)]
         })

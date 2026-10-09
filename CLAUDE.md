@@ -4,12 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-雪球组合监控系统 — 监控雪球组合持仓变动，通过钉钉/Telegram/飞书发送通知。
+雪球组合监控系统 — 监控雪球组合持仓变动，通过已启用的通知渠道发送。
 
-**Core files:**
-- `xueqiu_monitor.py` — 监控主程序，内置定时循环，无需外部调度器
-- `login.py` — 使用 Playwright 在本地 Chrome 中登录雪球并提取 Cookie
-- `notifier.py` — 多渠道通知适配器（钉钉、Telegram、飞书），每个渠道可独立启用/禁用
+**Core package `xueqiu_monitor/`:**
+- `monitor.py` — 监控主循环，内置定时，无需外部调度器。入口是 `python -m xueqiu_monitor`
+- `client.py` — 雪球 API 客户端（`XueQiuClient.get_current_positions`）
+- `changes.py` — 调仓记录里的主动买卖（`changes_from_rebalancing`）
+- `messages.py` — 通知正文（`build_markdown`）
+- `cookies.py` — Cookie 过期时间与哈希
+- `state.py` — `monitor_state.json` 读写
+- `config.py` — 环境变量。`.env` 和默认状态文件在仓库根目录，不在包目录里
+- `login.py` — Playwright 本机登录。入口是 `python -m xueqiu_monitor.login`
+- `notifiers/` — 每个渠道一个模块，由 `build_notifier` 按开关组装
 
 ## Development Commands
 
@@ -19,22 +25,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv sync
 
 # Get Xueqiu cookie (requires XUEQIU_ACCOUNT and XUEQIU_PASSWORD in .env)
-uv run python login.py
+uv run python -m xueqiu_monitor.login
 ```
 
 ### Run
 ```bash
 # Start monitoring (reads .env for config)
-uv run python xueqiu_monitor.py
+uv run python -m xueqiu_monitor
 ```
 
 ### Test
 ```bash
 # Run tests
-pytest
+uv run pytest
 
 # Run single test
-pytest tests/test_monitor.py::test_detect_changes -v
+uv run pytest tests/test_change_detection.py -v
 ```
 
 ### Lint
@@ -60,7 +66,7 @@ ruff check
   - `xq_id_token` JWT `exp` 字段（优先）
   - `xq_a_token` 尾部时间戳（兜底）
 - **Expiry warning:** 过期前 24 小时通知一次
-- **Auth failure:** 401/403 或响应要求登录时，通知并停止请求
+- **Auth failure:** HTTP 401，或响应明确要求登录时，通知一次并继续按间隔请求。单纯的 HTTP 403 会刷新风控 Cookie 后重试，不把登录票判死
 - **Cookie hash:** 用 MD5 追踪 Cookie 变更，避免同一份失效 Cookie 重复通知
 
 状态记录在 `monitor_state.json` 的 `_token` 字段：
@@ -92,14 +98,31 @@ ruff check
 
 ### Notification Flow
 
-`Notifier` 聚合所有启用的渠道，一次调用同时推送。未启用任何渠道时，视为发送成功（只记日志）。
+`Notifier` 聚合所有启用的渠道，一次调用同时推送。未启用任何渠道时，视为发送成功（只记日志）。某个渠道启用了但缺凭证：记一条错误并跳过该渠道，不退出监控循环。一个渠道请求失败不会挡住其余渠道。
 
-**Channel implementations:**
-- `DingTalkNotifier` — 无加签的自定义机器人
-- `TelegramNotifier` — Bot API `sendMessage`，Markdown 转 HTML
-- `FeishuNotifier` — 自建应用，卡片消息，长连接只用于事件订阅
+渠道和开关（默认都是 false）：
 
-所有渠道共享冷却期逻辑，由 `_in_cooldown` 统一控制。
+- 钉钉 `DINGTALK_ENABLED`：`DINGTALK_WEBHOOK`，可选 `DINGTALK_SECRET`（HMAC-SHA256 加签）、`AT_ALL`。无 secret 时仍是原来的无加签机器人
+- Telegram `TELEGRAM_ENABLED`：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`
+- 飞书自建应用 `FEISHU_ENABLED`：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_RECEIVE_ID`，可选 `FEISHU_RECEIVE_ID_TYPE`、`FEISHU_MODE`
+- 飞书群机器人 `FEISHU_WEBHOOK_ENABLED`：`FEISHU_WEBHOOK`，可选 `FEISHU_WEBHOOK_SECRET`。可以和自建应用同时开
+- 企业微信 `WECOM_ENABLED`：`WECOM_WEBHOOK`
+- Slack `SLACK_ENABLED`：`SLACK_WEBHOOK`
+- Discord `DISCORD_ENABLED`：`DISCORD_WEBHOOK`
+- 邮件 `SMTP_ENABLED`：`SMTP_HOST`、`SMTP_FROM`、`SMTP_TO`，可选 `SMTP_PORT`、`SMTP_USER`、`SMTP_PASSWORD`、`SMTP_STARTTLS`、`SMTP_SSL`
+- 通用 Webhook `HTTP_WEBHOOK_ENABLED`：`HTTP_WEBHOOK_URL`，可选 `HTTP_WEBHOOK_BEARER`、`HTTP_WEBHOOK_EXTRA`
+- ntfy `NTFY_ENABLED`：`NTFY_TOPIC`，可选 `NTFY_SERVER`、`NTFY_TOKEN`、`NTFY_PRIORITY`
+- Gotify `GOTIFY_ENABLED`：`GOTIFY_SERVER`、`GOTIFY_TOKEN`，可选 `GOTIFY_PRIORITY`
+- Pushover `PUSHOVER_ENABLED`：`PUSHOVER_USER`、`PUSHOVER_TOKEN`，可选 `PUSHOVER_PRIORITY`
+- Teams `TEAMS_ENABLED`：`TEAMS_WEBHOOK`
+- Matrix `MATRIX_ENABLED`：`MATRIX_HOMESERVER`、`MATRIX_ROOM_ID`、`MATRIX_TOKEN`
+- Server酱 `SERVERCHAN_ENABLED`：`SERVERCHAN_SENDKEY`
+- PushPlus `PUSHPLUS_ENABLED`：`PUSHPLUS_TOKEN`，可选 `PUSHPLUS_TOPIC`、`PUSHPLUS_TEMPLATE`
+- Bark `BARK_ENABLED`：`BARK_DEVICE_KEY`，可选 `BARK_SERVER`、`BARK_SOUND`、`BARK_GROUP`
+- WxPusher `WXPUSHER_ENABLED`：`WXPUSHER_APP_TOKEN`，以及 `WXPUSHER_UIDS` 或 `WXPUSHER_TOPIC_IDS`
+- PushDeer `PUSHDEER_ENABLED`：`PUSHDEER_PUSHKEY`，可选 `PUSHDEER_SERVER`
+
+所有渠道共用 `notifiers/base.py` 里的 `_in_cooldown`（60 秒，按组合）。
 
 ### State Persistence
 
@@ -127,35 +150,34 @@ ruff check
 
 Optional:
 - `CHECK_INTERVAL` (default: 300) — 检查间隔（秒）
-- `WEIGHT_CHANGE_THRESHOLD` (default: 1.0) — 仓位变动阈值（%）
-- `DINGTALK_ENABLED`, `TELEGRAM_ENABLED`, `FEISHU_ENABLED` (default: false) — 渠道开关
-- `DINGTALK_WEBHOOK`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — 渠道凭证
-- `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `FEISHU_RECEIVE_ID` — 飞书凭证
-- `LOG_FILE` (default: `xueqiu_monitor.log`) — 日志文件路径
+- `WEIGHT_CHANGE_THRESHOLD` (default: 0) — 仓位变动阈值（百分点）。0 表示有变化就通知
+- `STATE_FILE` (default: 仓库根目录 `monitor_state.json`；k3s 为 `/data/monitor_state.json`)
+- 通知渠道开关默认 false，变量名见上面的 Notification Flow，模板在 `.env.example`
+- `LOG_FILE` (default: `xueqiu_monitor.log`) — 日志文件路径。空字符串只输出到终端
 
 ## Deployment
 
-### k3s
+镜像只由 GitHub Actions（`.github/workflows/docker-publish.yml`）构建并发布。推送到 `main` 或打 `v*` 标签时，工作流构建 `linux/amd64` 与 `linux/arm64`，推送到 `ghcr.io/<owner>/xueqiu_monitor`（metadata-action 会把 `github.repository` 转成小写）。登录、Cookie、Playwright 和 kubeconfig 不进 Actions，也不要加部署作业。
 
 ```bash
-# Login to registry
-docker login gitea.173114.xyz
-
-# Build, push, and deploy
-k3s/release.sh
-
-# Only build and push
-k3s/push.sh
-
-# Update config without rebuild
-k3s/release.sh --skip-build
+docker pull ghcr.io/zeroornull/xueqiu_monitor:latest
 ```
 
-镜像运行监控主程序，登录仍在本机完成。持仓快照写在 `/data/monitor_state.json`。
+首次 GHCR 包可能是私有的，要在 GitHub Packages 里设为公开。工作流未完成或包未公开时，拉取会被拒绝，集群也拉不到。
+
+### k3s
+
+本机 `k3s/release.sh` 只把仓库根目录的 `.env` 写成 Secret，再 `kubectl apply` 清单。它不构建、不推送镜像。清单使用 `ghcr.io/zeroornull/xueqiu_monitor:latest`。`k3s/push.sh` 只提示镜像由 GitHub Actions 发布。`k3s/` 含本机集群细节，已 gitignore，不要提交。
+
+```bash
+k3s/release.sh
+```
+
+镜像运行监控主程序，登录仍在本机完成（`python -m xueqiu_monitor.login`）。持仓快照写在 `/data/monitor_state.json`。
 
 ## Important Notes
 
-- **Cookie lifecycle:** `login.py` 只在本机执行，k3s 镜像不包含自动登录能力
+- **Cookie lifecycle:** `python -m xueqiu_monitor.login` 只在本机执行。镜像不安装 Playwright，容器里自动重登会直接放弃
 - **Anti-bot handling:** 雪球首页访问会下发风控 Cookie（`_init_session`），只附上认证 Cookie 可能被拒
 - **Auth cookies:** 只保留 `xq_a_token`, `u`, `xq_r_token`, `xq_id_token`, `xqat`, `xq_is_login`，其余风控 Cookie 由每次会话下发
 - **Playwright profile:** 登录状态保存在 `.xueqiu-chrome/`，未过期时无需重新输入密码

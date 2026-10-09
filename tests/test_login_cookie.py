@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import dotenv_values
 
-from login import (
+from xueqiu_monitor.login import (
     credentials_from_env,
     decrypt_chrome_cookie,
     logged_in_cookie_header,

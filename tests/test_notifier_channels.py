@@ -8,16 +8,13 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import notifier
-from notifier import (
-    DingTalkNotifier,
-    FeishuNotifier,
-    Notifier,
-    TelegramNotifier,
-    _feishu_target,
-    _in_cooldown,
-    build_notifier,
-)
+import xueqiu_monitor.notifiers.dingtalk as dingtalk
+import xueqiu_monitor.notifiers.feishu as feishu
+import xueqiu_monitor.notifiers.telegram as telegram
+from xueqiu_monitor.notifiers import Notifier, _in_cooldown, build_notifier
+from xueqiu_monitor.notifiers.dingtalk import DingTalkNotifier
+from xueqiu_monitor.notifiers.feishu import FeishuNotifier, _feishu_target
+from xueqiu_monitor.notifiers.telegram import TelegramNotifier
 
 _NOTIFY_KEYS = (
     "DINGTALK_ENABLED",
@@ -32,6 +29,23 @@ _NOTIFY_KEYS = (
     "FEISHU_MODE",
     "FEISHU_RECEIVE_ID",
     "FEISHU_RECEIVE_ID_TYPE",
+    "DINGTALK_SECRET",
+    "FEISHU_WEBHOOK_ENABLED",
+    "WECOM_ENABLED",
+    "SLACK_ENABLED",
+    "DISCORD_ENABLED",
+    "SMTP_ENABLED",
+    "HTTP_WEBHOOK_ENABLED",
+    "NTFY_ENABLED",
+    "GOTIFY_ENABLED",
+    "PUSHOVER_ENABLED",
+    "TEAMS_ENABLED",
+    "MATRIX_ENABLED",
+    "SERVERCHAN_ENABLED",
+    "PUSHPLUS_ENABLED",
+    "BARK_ENABLED",
+    "WXPUSHER_ENABLED",
+    "PUSHDEER_ENABLED",
 )
 
 
@@ -142,7 +156,7 @@ class TestSend:
 
     def test_dingtalk_markdown_and_cooldown(self):
         bot = DingTalkNotifier("https://example.test/hook", at_all=True)
-        with patch.object(notifier.requests, "post", return_value=_response({"errcode": 0})) as post:
+        with patch.object(dingtalk.requests, "post", return_value=_response({"errcode": 0})) as post:
             assert bot.send_markdown("标题", "正文", cube_id="ZH1") is True
             assert bot.send_markdown("标题", "正文", cube_id="ZH1") is True
         assert post.call_count == 1
@@ -152,12 +166,12 @@ class TestSend:
 
     def test_dingtalk_failure(self):
         bot = DingTalkNotifier("https://example.test/hook")
-        with patch.object(notifier.requests, "post", return_value=_response({"errcode": 310000})):
+        with patch.object(dingtalk.requests, "post", return_value=_response({"errcode": 310000})):
             assert bot.send_text("失败") is False
 
     def test_telegram_html(self):
         bot = TelegramNotifier("123:abc", "99")
-        with patch.object(notifier.requests, "post", return_value=_response({"ok": True})) as post:
+        with patch.object(telegram.requests, "post", return_value=_response({"ok": True})) as post:
             assert bot.send_markdown("标题", "## 变动\n**茅台**", cube_id="ZH1") is True
         body = post.call_args.kwargs["json"]
         assert body["chat_id"] == "99"
@@ -166,14 +180,14 @@ class TestSend:
 
     def test_telegram_request_error_hides_body(self):
         bot = TelegramNotifier("123:abc", "99")
-        with patch.object(notifier.requests, "post", side_effect=TimeoutError("slow")):
+        with patch.object(telegram.requests, "post", side_effect=TimeoutError("slow")):
             assert bot.send_text("超时") is False
 
     def test_feishu_text_uses_cached_token(self):
         bot = FeishuNotifier("cli_test", "secret", "employee1", "user_id")
         token = _response({"code": 0, "tenant_access_token": "t-1", "expire": 7200})
         sent = _response({"code": 0, "data": {"message_id": "om_1"}})
-        with patch.object(notifier.requests, "post", side_effect=[token, sent, sent]) as post:
+        with patch.object(feishu.requests, "post", side_effect=[token, sent, sent]) as post:
             assert bot.send_text("测试") is True
             assert bot.send_text("再来一条") is True
         assert post.call_count == 3
@@ -189,7 +203,7 @@ class TestSend:
         bot = FeishuNotifier("cli_test", "secret", "oc_1", "chat_id")
         token = _response({"code": 0, "tenant_access_token": "t-1", "expire": 7200})
         sent = _response({"code": 0})
-        with patch.object(notifier.requests, "post", side_effect=[token, sent]) as post:
+        with patch.object(feishu.requests, "post", side_effect=[token, sent]) as post:
             assert bot.send_markdown("标题", "## 明细\n> 引用", cube_id="") is True
         content = json.loads(post.call_args.kwargs["json"]["content"])
         assert content["header"]["title"]["content"] == "标题"
@@ -198,7 +212,7 @@ class TestSend:
 
     def test_feishu_token_failure(self):
         bot = FeishuNotifier("cli_test", "secret", "oc_1", "chat_id")
-        with patch.object(notifier.requests, "post", return_value=_response({"code": 99991663, "msg": "invalid"})):
+        with patch.object(feishu.requests, "post", return_value=_response({"code": 99991663, "msg": "invalid"})):
             assert bot.send_text("不会发出") is False
 
     def test_aggregate_failure(self):
@@ -211,3 +225,12 @@ class TestSend:
         assert note.send_markdown("t", "c", "ZH1") is False
         assert note.send_text("c") is False
         ok.send_markdown.assert_called_once()
+
+    def test_dingtalk_secret_is_added_to_the_url(self, monkeypatch):
+        monkeypatch.setattr(dingtalk.time, "time", lambda: 1600000000)
+        bot = DingTalkNotifier("https://example.test/hook?access_token=abc", secret="SEC123")
+        with patch.object(dingtalk.requests, "post", return_value=_response({"errcode": 0})) as post:
+            assert bot.send_text("正文") is True
+        url = post.call_args.args[0]
+        assert url.startswith("https://example.test/hook?access_token=abc&timestamp=1600000000000&sign=")
+        assert dingtalk.sign("SEC123", "1600000000000") in url

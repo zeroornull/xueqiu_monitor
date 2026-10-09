@@ -5,8 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from xueqiu_monitor import build_markdown
-from notifier import _markdown_to_html, _markdown_to_feishu
+from xueqiu_monitor.messages import build_markdown
+from xueqiu_monitor.notifiers.feishu import _markdown_to_feishu
+from xueqiu_monitor.notifiers.telegram import _markdown_to_html
 
 
 class TestBuildMarkdown:

@@ -7,25 +7,18 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import xueqiu_monitor as xm
-from xueqiu_monitor import (
-    CookieExpired,
-    XueQiuClient,
-    _auth_failure_reason,
-    _check_config,
-    _check_token_expiry,
-    _cookie_already_failed,
-    _is_user_id_token,
-    _load_state,
-    _save_cube_state,
-    _save_state,
-    _stop_for_cookie,
-    _token_state,
-    monitor_once,
-    parse_nav_from_rebalancing,
-)
+import xueqiu_monitor.config as config
+import xueqiu_monitor.monitor as monitor
+import xueqiu_monitor.state as state_mod
+from xueqiu_monitor.changes import parse_nav_from_rebalancing
+from xueqiu_monitor.client import CookieExpired, XueQiuClient, _auth_failure_reason
+from xueqiu_monitor.cookies import _cookie_already_failed, _is_user_id_token, _token_state
+from xueqiu_monitor.monitor import _check_config, _check_token_expiry, _stop_for_cookie, monitor_once
+from xueqiu_monitor.state import _load_state, _save_cube_state, _save_state
 
 
 def _jwt(payload: dict) -> str:
@@ -87,21 +80,21 @@ class TestAuthAndNav:
         assert parse_nav_from_rebalancing(record) == {"name": "历史名称"}
 
     def test_check_config(self, capsys, monkeypatch):
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=你的token")
-        monkeypatch.setattr(xm, "MONITORED_CUBES", ["ZH123456"])
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", "xq_a_token=你的token")
+        monkeypatch.setattr(config, "MONITORED_CUBES", ["ZH123456"])
         assert _check_config() is False
         captured = capsys.readouterr().out
         assert "Cookie" in captured
         assert "监控组合" in captured
 
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=abc;u=1")
-        monkeypatch.setattr(xm, "MONITORED_CUBES", ["ZH999999"])
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", "xq_a_token=abc;u=1")
+        monkeypatch.setattr(config, "MONITORED_CUBES", ["ZH999999"])
         assert _check_config() is True
 
 
 class TestStateAndCookie:
     def test_token_state_resets_when_cookie_changes(self, monkeypatch):
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=one;u=1")
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", "xq_a_token=one;u=1")
         state = {"_token": {"hash": "stale", "auth_failed": True, "notified_expiry": True}}
         fresh = _token_state(state)
         assert fresh["hash"]
@@ -113,7 +106,7 @@ class TestStateAndCookie:
 
     def test_load_and_save_roundtrip(self, tmp_path, monkeypatch):
         path = tmp_path / "state.json"
-        monkeypatch.setattr(xm, "_STATE_FILE", str(path))
+        monkeypatch.setattr(state_mod, "_STATE_FILE", str(path))
         assert _load_state() == {}
         path.write_text("{", encoding="utf-8")
         assert _load_state() == {}
@@ -127,7 +120,7 @@ class TestStateAndCookie:
 
     def test_expiry_warning_once(self, monkeypatch):
         expiry = time.time() + 10 * 3600
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", f"xq_a_token=abc_{int(expiry)}")
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", f"xq_a_token=abc_{int(expiry)}")
         note = _Notifier()
         state = {}
         assert _check_token_expiry(state, note) is True
@@ -138,14 +131,14 @@ class TestStateAndCookie:
 
     def test_expiry_outside_window_is_silent(self, monkeypatch):
         expiry = time.time() + 48 * 3600
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", f"xq_a_token=abc_{int(expiry)}")
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", f"xq_a_token=abc_{int(expiry)}")
         note = _Notifier()
         assert _check_token_expiry({}, note) is False
         assert note.markdown == []
 
     def test_stop_retries_failed_notice(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(xm, "_STATE_FILE", str(tmp_path / "state.json"))
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=abc;u=1")
+        monkeypatch.setattr(state_mod, "_STATE_FILE", str(tmp_path / "state.json"))
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", "xq_a_token=abc;u=1")
         note = _Notifier(ok=False)
         state = {}
         _stop_for_cookie(state, note, "HTTP 401")
@@ -244,7 +237,7 @@ class TestClientParsing:
     def test_get_returns_none_on_http_error(self):
         client = _client()
         resp = _response(500, {"ok": False})
-        resp.raise_for_status.side_effect = xm.requests.exceptions.HTTPError("500")
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
         client.session.get = MagicMock(return_value=resp)
         assert client._get("https://xueqiu.com/missing") is None
 
@@ -257,10 +250,10 @@ class TestClientParsing:
 
 class TestMonitorOnce:
     def _patch_common(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(xm, "_STATE_FILE", str(tmp_path / "state.json"))
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=abc;u=1")
-        monkeypatch.setattr(xm, "MONITORED_CUBES", ["ZH1"])
-        monkeypatch.setattr(xm.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(state_mod, "_STATE_FILE", str(tmp_path / "state.json"))
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", "xq_a_token=abc;u=1")
+        monkeypatch.setattr(config, "MONITORED_CUBES", ["ZH1"])
+        monkeypatch.setattr(monitor.time, "sleep", lambda _seconds: None)
 
     def test_saves_when_positions_unchanged(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
@@ -381,8 +374,8 @@ class TestMonitorOnce:
 
     def test_past_expiry_still_requests(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
-        monkeypatch.setattr(xm, "XUEQIU_COOKIE", "xq_a_token=abc_1735660800")
-        monkeypatch.setattr(xm, "_attempt_relogin", lambda client: "failed")
+        monkeypatch.setattr(config, "XUEQIU_COOKIE", "xq_a_token=abc_1735660800")
+        monkeypatch.setattr(monitor, "_attempt_relogin", lambda client: "failed")
         client = _client()
         client.get_current_positions = MagicMock(return_value=[])
         client.last_fetch_ok = False
@@ -393,7 +386,7 @@ class TestMonitorOnce:
 
     def test_auth_error_keeps_running(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
-        monkeypatch.setattr(xm, "_attempt_relogin", lambda client: "unavailable")
+        monkeypatch.setattr(monitor, "_attempt_relogin", lambda client: "unavailable")
         client = _client()
         client.get_current_positions = MagicMock(side_effect=CookieExpired("HTTP 403"))
         note = _Notifier()
@@ -417,10 +410,10 @@ class TestMonitorOnce:
             return []
 
         def relogin(target):
-            xm.XUEQIU_COOKIE = "xq_a_token=fresh;u=2"
+            config.XUEQIU_COOKIE = "xq_a_token=fresh;u=2"
             return "ok"
 
-        monkeypatch.setattr(xm, "_attempt_relogin", relogin)
+        monkeypatch.setattr(monitor, "_attempt_relogin", relogin)
         client.get_current_positions = positions
         client.get_rebalancing_history = MagicMock(return_value=[{"id": 1, "cube_name": "组合"}])
         note = _Notifier()
@@ -430,7 +423,7 @@ class TestMonitorOnce:
 
     def test_auth_error_during_fetch_keeps_running(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
-        monkeypatch.setattr(xm, "_attempt_relogin", lambda client: "failed")
+        monkeypatch.setattr(monitor, "_attempt_relogin", lambda client: "failed")
         client = _client()
         client.get_current_positions = MagicMock(side_effect=CookieExpired("HTTP 403"))
         note = _Notifier()

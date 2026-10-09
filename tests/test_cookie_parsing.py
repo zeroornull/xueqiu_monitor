@@ -1,12 +1,11 @@
 """Tests for cookie expiry parsing logic."""
 
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from xueqiu_monitor import _get_token_expiry, _jwt_expiry
+from xueqiu_monitor.cookies import _get_token_expiry, _jwt_expiry
 
 
 class TestCookieParsing:

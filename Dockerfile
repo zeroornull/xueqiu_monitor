@@ -14,9 +14,9 @@ RUN apt-get update \
     && chown app:app /data
 
 WORKDIR /app
-COPY xueqiu_monitor.py notifier.py ./
+COPY xueqiu_monitor ./xueqiu_monitor
 RUN pip install --no-cache-dir "requests==2.34.2" "python-dotenv==1.2.3" \
     && chown -R app:app /app
 
 USER 1000
-CMD ["python", "xueqiu_monitor.py"]
+CMD ["python", "-m", "xueqiu_monitor"]
