@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 雪球组合监控系统 — 监控雪球组合持仓变动，通过已启用的通知渠道发送。
 
 **Core package `xueqiu_monitor/`:**
-- `monitor.py` — 监控主循环，内置定时，无需外部调度器。入口是 `python -m xueqiu_monitor`
+- `monitor.py` — 监控主循环，按交易时段决定等待间隔。入口是 `python -m xueqiu_monitor`
+- `schedule.py` — 盘中、休市、收盘前加速的间隔
 - `client.py` — 雪球 API 客户端（`XueQiuClient.get_current_positions`）
 - `changes.py` — 调仓记录里的主动买卖（`changes_from_rebalancing`）
 - `messages.py` — 通知正文（`build_markdown`）
@@ -149,7 +150,9 @@ ruff check
 - `MONITORED_CUBES` — 监控的组合代码，逗号分隔（如 `ZH123456,ZH654321`）
 
 Optional:
-- `CHECK_INTERVAL` (default: 300) — 检查间隔（秒）
+- `CHECK_INTERVAL` (default: 300) — 交易时段检查间隔（秒）
+- `TRADING_HOURS_ONLY` (default: true) — 休市和周末改用 `OFF_HOURS_INTERVAL`（默认 1800）。设为 false 则始终用 `CHECK_INTERVAL`
+- `OFF_HOURS_INTERVAL` / `PRE_CLOSE_MINUTES` / `PRE_CLOSE_INTERVAL` / `MARKET_CLOSE` — 休市间隔、收盘前加速和下午收盘时间（默认 15:00）
 - `WEIGHT_CHANGE_THRESHOLD` (default: 0) — 仓位变动阈值（百分点）。0 表示有变化就通知
 - `STATE_FILE` (default: 仓库根目录 `monitor_state.json`；k3s 为 `/data/monitor_state.json`)
 - 通知渠道开关默认 false，变量名见上面的 Notification Flow，模板在 `.env.example`

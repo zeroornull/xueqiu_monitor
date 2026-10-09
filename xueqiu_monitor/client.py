@@ -185,6 +185,10 @@ class XueQiuClient:
             source = "history"
             self.last_fetch_ok = data is not None
 
+        if data is None:
+            logger.warning(f"[{self.portfolio_id}] 持仓接口全部失败，返回空列表")
+            return []
+
         positions = []
         try:
             if source in ("current", "v5"):

@@ -33,6 +33,12 @@ MONITORED_CUBES: list[str] = (
 )
 
 CHECK_INTERVAL: int = int(os.environ.get("CHECK_INTERVAL", "300"))
+# 工作日盘中用 CHECK_INTERVAL；休市和周末用更长间隔，收盘前可缩短。
+TRADING_HOURS_ONLY: bool = os.environ.get("TRADING_HOURS_ONLY", "true").lower() == "true"
+OFF_HOURS_INTERVAL: int = int(os.environ.get("OFF_HOURS_INTERVAL", "1800"))
+PRE_CLOSE_MINUTES: int = int(os.environ.get("PRE_CLOSE_MINUTES", "15"))
+PRE_CLOSE_INTERVAL: int = int(os.environ.get("PRE_CLOSE_INTERVAL", "60"))
+MARKET_CLOSE: str = os.environ.get("MARKET_CLOSE", "15:00")
 WEIGHT_CHANGE_THRESHOLD: float = float(os.environ.get("WEIGHT_CHANGE_THRESHOLD", "0"))
 LOG_FILE: str = os.environ.get("LOG_FILE", "xueqiu_monitor.log")
 

@@ -8,7 +8,7 @@
 
 ## 功能特性
 
-- **自动轮询** — 内置定时循环，无需额外调度器
+- **自动轮询** — 内置定时循环，无需额外调度器。默认按交易时段调度：盘中用检查间隔，休市和周末拉长，收盘前可加速
 - **仓位变动检测** — 基于本地持久化的持仓快照对比，避免重复触发
 - **三接口级联降级** — 主接口 → v5 备用 → history 降级，自动切换保障稳定
 - **防重复推送（双重）** — 调仓记录 ID 比对 + 60 秒冷却期，重启也不重复
@@ -64,8 +64,13 @@ uv run python -m xueqiu_monitor
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `CHECK_INTERVAL` | 300 | 检查间隔（秒），5 分钟 |
-| `WEIGHT_CHANGE_THRESHOLD` | 1.0 | 仓位变动阈值（%），超过才通知 |
+| `CHECK_INTERVAL` | 300 | 交易时段检查间隔（秒） |
+| `TRADING_HOURS_ONLY` | true | 休市和周末改用 `OFF_HOURS_INTERVAL`。设为 false 则始终用 `CHECK_INTERVAL` |
+| `OFF_HOURS_INTERVAL` | 1800 | 非交易时段检查间隔（秒） |
+| `PRE_CLOSE_MINUTES` | 15 | 收盘前多少分钟改用更短间隔 |
+| `PRE_CLOSE_INTERVAL` | 60 | 收盘前检查间隔（秒） |
+| `MARKET_CLOSE` | 15:00 | 下午收盘时间。组合含港股可设 `16:00` |
+| `WEIGHT_CHANGE_THRESHOLD` | 0 | 仓位变动阈值（百分点）。0 表示有变化就通知 |
 | `DINGTALK_ENABLED` | false | 是否启用钉钉通知 |
 | `DINGTALK_WEBHOOK` | 空 | 钉钉机器人 Webhook，仅在启用钉钉时必填 |
 | `AT_ALL` | false | 钉钉是否 @所有人 |
@@ -176,6 +181,7 @@ xueqiu_monitor/              # 仓库根目录
 ├── xueqiu_monitor/          # Python 包
 │   ├── __main__.py          # python -m xueqiu_monitor
 │   ├── monitor.py           # 定时循环
+│   ├── schedule.py          # 交易时段间隔
 │   ├── client.py            # 雪球接口
 │   ├── changes.py           # 调仓变动
 │   ├── messages.py          # 通知正文

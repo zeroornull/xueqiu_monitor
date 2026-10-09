@@ -207,11 +207,14 @@ class TestClientParsing:
         assert positions[0]["symbol"] == "SZ002594"
         assert positions[0]["prev_weight"] == 5.0
 
-    def test_all_sources_fail(self):
+    def test_all_sources_fail(self, caplog):
         client = _client()
-        with patch.object(client, "_get", return_value=None):
-            assert client.get_current_positions() == []
+        with caplog.at_level("WARNING"):
+            with patch.object(client, "_get", return_value=None):
+                assert client.get_current_positions() == []
         assert client.last_fetch_ok is False
+        assert "持仓接口全部失败" in caplog.text
+        assert "持仓解析失败" not in caplog.text
 
     def test_get_raises_on_auth_failure(self):
         client = _client()

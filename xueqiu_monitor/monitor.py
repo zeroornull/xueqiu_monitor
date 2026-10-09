@@ -12,6 +12,7 @@ from xueqiu_monitor.client import CookieExpired, XueQiuClient
 from xueqiu_monitor.cookies import _get_token_expiry, _token_state
 from xueqiu_monitor.messages import build_markdown
 from xueqiu_monitor.notifiers import Notifier, build_notifier
+from xueqiu_monitor.schedule import get_schedule_info
 from xueqiu_monitor.state import _load_state, _save_cube_state, _save_state
 
 logger = logging.getLogger(__name__)
@@ -286,8 +287,10 @@ def main():
         _print_config_help()
         sys.exit(1)
 
+    sched = get_schedule_info()
     print(f"\n📌 监控组合: {', '.join(config.MONITORED_CUBES)}")
-    print(f"⏱  检查间隔: {config.CHECK_INTERVAL} 秒")
+    print(f"⏱  交易时段间隔: {config.CHECK_INTERVAL} 秒｜休市间隔: {config.OFF_HOURS_INTERVAL} 秒")
+    print(f"📅 当前时段: {sched['label']}（下次间隔 {sched['interval']} 秒）")
     if config.WEIGHT_CHANGE_THRESHOLD <= 0:
         print("📊 仓位变动: 有变化就通知")
     else:
@@ -303,9 +306,10 @@ def main():
 
     try:
         while True:
-            next_run = datetime.now().strftime("%H:%M:%S")
-            logger.info(f"等待 {config.CHECK_INTERVAL} 秒后再次检查（下次约 {next_run}）...")
-            time.sleep(config.CHECK_INTERVAL)
+            sched = get_schedule_info()
+            interval = int(sched["interval"])
+            logger.info(f"当前时段「{sched['label']}」，等待 {interval} 秒后再次检查...")
+            time.sleep(interval)
             if monitor_once(client, notifier):
                 sys.exit(2)
     except KeyboardInterrupt:
