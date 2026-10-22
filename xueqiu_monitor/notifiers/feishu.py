@@ -6,7 +6,7 @@ import time
 
 import requests
 
-from xueqiu_monitor.notifiers.base import _in_cooldown, enabled, env, reject
+from xueqiu_monitor.notifiers.base import _in_cooldown, _mark_sent, enabled, env, reject
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,8 @@ class FeishuNotifier:
         logger.error(f"飞书发送失败: {result.get('code')} {result.get('msg')}")
         return False
 
-    def send_markdown(self, title: str, content: str, cube_id: str = "") -> bool:
-        if _in_cooldown(self._last_send, cube_id):
+    def send_markdown(self, title: str, content: str, cube_id: str = "", rb_id: str | int = "") -> bool:
+        if _in_cooldown(self._last_send, cube_id, rb_id):
             logger.info(f"[{cube_id}] 飞书冷却期内，跳过重复通知")
             return True
         card = {
@@ -115,8 +115,8 @@ class FeishuNotifier:
             "elements": [{"tag": "markdown", "content": _markdown_to_feishu(content)}],
         }
         ok = self._post("interactive", json.dumps(card, ensure_ascii=False))
-        if ok and cube_id:
-            self._last_send[cube_id] = time.time()
+        if ok:
+            _mark_sent(self._last_send, cube_id, rb_id)
         return ok
 
     def send_text(self, content: str) -> bool:

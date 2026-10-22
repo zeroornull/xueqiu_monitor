@@ -18,6 +18,9 @@ from xueqiu_monitor.changes import parse_nav_from_rebalancing
 from xueqiu_monitor.client import CookieExpired, XueQiuClient, _auth_failure_reason
 from xueqiu_monitor.cookies import _cookie_already_failed, _is_user_id_token, _token_state
 from xueqiu_monitor.monitor import _check_config, _check_token_expiry, _stop_for_cookie, monitor_once
+from xueqiu_monitor.notifiers.base import Notifier
+from xueqiu_monitor.notifiers.dingtalk import DingTalkNotifier
+from xueqiu_monitor.notifiers.slack import SlackNotifier
 from xueqiu_monitor.state import _load_state, _save_cube_state, _save_state
 
 
@@ -37,6 +40,32 @@ def _response(status, payload=None, bad_json=False):
     return resp
 
 
+def _http_ok(payload):
+    resp = MagicMock()
+    resp.ok = True
+    resp.status_code = 200
+    resp.content = b"{}"
+    resp.text = "ok"
+    resp.json.return_value = payload
+    return resp
+
+
+def _rebalance(rb_id, symbol, name, old, new):
+    return {
+        "id": rb_id,
+        "status": "success",
+        "cube_name": "组合",
+        "rebalancing_histories": [{
+            "stock_symbol": symbol,
+            "stock_name": name,
+            "proactive": True,
+            "prev_weight_adjusted": old,
+            "target_weight": new,
+            "price": 1.0,
+        }],
+    }
+
+
 def _client(cookie="xq_a_token=abc;u=9;acw_tc=drop"):
     with patch.object(XueQiuClient, "_init_session"):
         client = XueQiuClient(cookie, "zh1")
@@ -50,7 +79,7 @@ class _Notifier:
         self.markdown = []
         self.texts = []
 
-    def send_markdown(self, title, content, cube_id=""):
+    def send_markdown(self, title, content, cube_id="", rb_id=""):
         self.markdown.append((title, content, cube_id))
         return self.ok
 
@@ -374,6 +403,7 @@ class TestMonitorOnce:
         note = _Notifier(ok=False)
         assert monitor_once(client, note) is False
         assert _load_state()["ZH1"]["positions"] == old
+        assert _load_state()["ZH1"]["last_rb_id"] == 1
 
     def test_fetch_failure_keeps_snapshot(self, monkeypatch, tmp_path):
         self._patch_common(monkeypatch, tmp_path)
@@ -451,3 +481,72 @@ class TestMonitorOnce:
         note = _Notifier()
         assert monitor_once(client, note) is False
         assert "boom" in note.texts[0]
+
+    def _history_client(self, records):
+        client = _client()
+        client.get_current_positions = MagicMock(return_value=[])
+        client.last_fetch_ok = True
+        client.get_rebalancing_history = MagicMock(return_value=records)
+        return client
+
+    def test_two_new_rebalances_both_notify(self, monkeypatch, tmp_path):
+        self._patch_common(monkeypatch, tmp_path)
+        _save_state({"ZH1": {"positions": [], "last_rb_id": 1, "nav": {"name": "组合"}}})
+        client = self._history_client([
+            _rebalance(3, "SH601318", "中国平安", 10.0, 0),
+            _rebalance(2, "SH600519", "贵州茅台", 10.0, 12.0),
+        ])
+        note = Notifier([
+            DingTalkNotifier("https://example.test/hook"),
+            SlackNotifier("https://slack.test/hook"),
+        ])
+        with (
+            patch("xueqiu_monitor.notifiers.dingtalk.requests.post", return_value=_http_ok({"errcode": 0})) as ding,
+            patch("xueqiu_monitor.notifiers.base.requests.request", return_value=_http_ok({})) as slack,
+        ):
+            assert monitor_once(client, note) is False
+        ding_text = "\n".join(call.kwargs["json"]["markdown"]["text"] for call in ding.call_args_list)
+        slack_text = "\n".join(call.kwargs["json"]["text"] for call in slack.call_args_list)
+        assert ding.call_count == 2
+        assert slack.call_count == 2
+        assert "贵州茅台" in ding_text and "中国平安" in ding_text
+        assert "贵州茅台" in slack_text and "中国平安" in slack_text
+        assert _load_state()["ZH1"]["last_rb_id"] == 3
+
+    def test_same_rebalance_within_cooldown_is_not_sent_again(self, monkeypatch, tmp_path):
+        self._patch_common(monkeypatch, tmp_path)
+        _save_state({"ZH1": {"positions": [], "last_rb_id": 1, "nav": {"name": "组合"}}})
+        client = self._history_client([_rebalance(2, "SH600519", "贵州茅台", 10.0, 12.0)])
+        note = Notifier([
+            DingTalkNotifier("https://example.test/hook"),
+            SlackNotifier("https://slack.test/hook"),
+        ])
+        with (
+            patch("xueqiu_monitor.notifiers.dingtalk.requests.post", return_value=_http_ok({"errcode": 0})) as ding,
+            patch("xueqiu_monitor.notifiers.base.requests.request", return_value=_http_ok({})) as slack,
+        ):
+            assert monitor_once(client, note) is False
+            saved = _load_state()
+            saved["ZH1"]["last_rb_id"] = 1
+            _save_state(saved)
+            assert monitor_once(client, note) is False
+        assert ding.call_count == 1
+        assert slack.call_count == 1
+        assert _load_state()["ZH1"]["last_rb_id"] == 2
+
+    def test_real_channel_failure_keeps_last_rb_id(self, monkeypatch, tmp_path):
+        self._patch_common(monkeypatch, tmp_path)
+        _save_state({"ZH1": {"positions": [{"symbol": "SH600519"}], "last_rb_id": 1}})
+        client = self._history_client([_rebalance(2, "SH600519", "贵州茅台", 10.0, 0)])
+        note = Notifier([DingTalkNotifier("https://example.test/hook")])
+        with patch(
+            "xueqiu_monitor.notifiers.dingtalk.requests.post",
+            return_value=_http_ok({"errcode": 310000}),
+        ) as post:
+            assert monitor_once(client, note) is False
+            assert post.call_count == 1
+            assert _load_state()["ZH1"]["last_rb_id"] == 1
+            post.return_value = _http_ok({"errcode": 0})
+            assert monitor_once(client, note) is False
+        assert post.call_count == 2
+        assert _load_state()["ZH1"]["last_rb_id"] == 2

@@ -9,7 +9,7 @@ import urllib.parse
 
 import requests
 
-from xueqiu_monitor.notifiers.base import _in_cooldown, enabled, env, reject
+from xueqiu_monitor.notifiers.base import _in_cooldown, _mark_sent, enabled, env, reject
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,8 @@ class DingTalkNotifier:
             logger.error(f"钉钉请求异常: {e}")
             return False
 
-    def send_markdown(self, title: str, content: str, cube_id: str = "") -> bool:
-        if _in_cooldown(self._last_send, cube_id):
+    def send_markdown(self, title: str, content: str, cube_id: str = "", rb_id: str | int = "") -> bool:
+        if _in_cooldown(self._last_send, cube_id, rb_id):
             logger.info(f"[{cube_id}] 钉钉冷却期内，跳过重复通知")
             return True
         payload = {
@@ -66,8 +66,8 @@ class DingTalkNotifier:
             "at": {"isAtAll": self.at_all},
         }
         ok = self._post(payload)
-        if ok and cube_id:
-            self._last_send[cube_id] = time.time()
+        if ok:
+            _mark_sent(self._last_send, cube_id, rb_id)
         return ok
 
     def send_text(self, content: str) -> bool:

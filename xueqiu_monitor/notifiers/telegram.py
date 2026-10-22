@@ -2,11 +2,10 @@
 
 import logging
 import re
-import time
 
 import requests
 
-from xueqiu_monitor.notifiers.base import _in_cooldown, enabled, env, reject
+from xueqiu_monitor.notifiers.base import _in_cooldown, _mark_sent, enabled, env, reject
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +68,13 @@ class TelegramNotifier:
             logger.error(f"Telegram 请求异常: {type(e).__name__}")
             return False
 
-    def send_markdown(self, _title: str, content: str, cube_id: str = "") -> bool:
-        if _in_cooldown(self._last_send, cube_id):
+    def send_markdown(self, _title: str, content: str, cube_id: str = "", rb_id: str | int = "") -> bool:
+        if _in_cooldown(self._last_send, cube_id, rb_id):
             logger.info(f"[{cube_id}] Telegram 冷却期内，跳过重复通知")
             return True
         ok = self._post(_markdown_to_html(content))
-        if ok and cube_id:
-            self._last_send[cube_id] = time.time()
+        if ok:
+            _mark_sent(self._last_send, cube_id, rb_id)
         return ok
 
     def send_text(self, content: str) -> bool:

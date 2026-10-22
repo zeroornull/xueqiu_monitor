@@ -216,7 +216,7 @@ def monitor_once(client: XueQiuClient, notifier: Notifier) -> bool:
                     if changes:
                         logger.info(f"[{cube_id}] 检测到 {len(changes)} 项主动调仓，准备发送通知")
                         title, content = build_markdown(cube_id, record_nav, changes)
-                        ok = notifier.send_markdown(title, content, cube_id=cube_id)
+                        ok = notifier.send_markdown(title, content, cube_id=cube_id, rb_id=rb_id)
                         if not ok:
                             logger.error(f"[{cube_id}] 通知发送失败，保留旧状态，下次重试")
                             break

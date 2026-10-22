@@ -64,10 +64,24 @@ def clip(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
-def _in_cooldown(last_send: dict[str, float], cube_id: str) -> bool:
+def _cooldown_key(cube_id: str, rb_id: str | int = "") -> str:
+    # 按组合和调仓 ID 去重。只按组合的话，同一轮后面的新调仓会被当成已经发过。
     if not cube_id:
+        return ""
+    return f"{cube_id}:{rb_id}"
+
+
+def _in_cooldown(last_send: dict[str, float], cube_id: str, rb_id: str | int = "") -> bool:
+    key = _cooldown_key(cube_id, rb_id)
+    if not key:
         return False
-    return time.time() - last_send.get(cube_id, 0) < _COOLDOWN_SECONDS
+    return time.time() - last_send.get(key, 0) < _COOLDOWN_SECONDS
+
+
+def _mark_sent(last_send: dict[str, float], cube_id: str, rb_id: str | int = "") -> None:
+    key = _cooldown_key(cube_id, rb_id)
+    if key:
+        last_send[key] = time.time()
 
 
 def _host(url: str) -> str:
@@ -125,8 +139,8 @@ class TextChannel:
     def __init__(self):
         self._last_send: dict[str, float] = {}
 
-    def send(self, text: str, *, title: str = "", cube_id: str = "") -> bool:
-        if _in_cooldown(self._last_send, cube_id):
+    def send(self, text: str, *, title: str = "", cube_id: str = "", rb_id: str | int = "") -> bool:
+        if _in_cooldown(self._last_send, cube_id, rb_id):
             logger.info(f"[{cube_id}] {self.name} 冷却期内，跳过重复通知")
             return True
         try:
@@ -134,15 +148,15 @@ class TextChannel:
         except Exception as exc:
             logger.error(f"{self.name} 请求异常: {type(exc).__name__}")
             return False
-        if ok and cube_id:
-            self._last_send[cube_id] = time.time()
+        if ok:
+            _mark_sent(self._last_send, cube_id, rb_id)
         return bool(ok)
 
     def deliver(self, text: str, title: str) -> bool:
         raise NotImplementedError
 
-    def send_markdown(self, title: str, content: str, cube_id: str = "") -> bool:
-        return self.send(content, title=title, cube_id=cube_id)
+    def send_markdown(self, title: str, content: str, cube_id: str = "", rb_id: str | int = "") -> bool:
+        return self.send(content, title=title, cube_id=cube_id, rb_id=rb_id)
 
     def send_text(self, content: str) -> bool:
         return self.send(content, title=title_from(content))
@@ -174,8 +188,8 @@ class Notifier:
                 ok = False
         return ok
 
-    def send_markdown(self, title: str, content: str, cube_id: str = "") -> bool:
-        return self._fanout("send_markdown", title, content, cube_id)
+    def send_markdown(self, title: str, content: str, cube_id: str = "", rb_id: str | int = "") -> bool:
+        return self._fanout("send_markdown", title, content, cube_id, rb_id)
 
     def send_text(self, content: str) -> bool:
         return self._fanout("send_text", content)

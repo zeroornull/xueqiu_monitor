@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import xueqiu_monitor.notifiers.dingtalk as dingtalk
@@ -14,6 +16,7 @@ import xueqiu_monitor.notifiers.telegram as telegram
 from xueqiu_monitor.notifiers import Notifier, _in_cooldown, build_notifier
 from xueqiu_monitor.notifiers.dingtalk import DingTalkNotifier
 from xueqiu_monitor.notifiers.feishu import FeishuNotifier, _feishu_target
+from xueqiu_monitor.notifiers.slack import SlackNotifier
 from xueqiu_monitor.notifiers.telegram import TelegramNotifier
 
 _NOTIFY_KEYS = (
@@ -234,3 +237,47 @@ class TestSend:
         url = post.call_args.args[0]
         assert url.startswith("https://example.test/hook?access_token=abc&timestamp=1600000000000&sign=")
         assert dingtalk.sign("SEC123", "1600000000000") in url
+
+
+def _sent(payload):
+    resp = MagicMock()
+    resp.ok = True
+    resp.status_code = 200
+    resp.content = b"{}"
+    resp.text = "ok"
+    resp.json.return_value = payload
+    return resp
+
+
+def _rb_channel(name):
+    if name == "dingtalk":
+        channel = DingTalkNotifier("https://example.test/hook")
+        return channel, "xueqiu_monitor.notifiers.dingtalk.requests.post", {"errcode": 0}
+    if name == "telegram":
+        channel = TelegramNotifier("123:abc", "99")
+        return channel, "xueqiu_monitor.notifiers.telegram.requests.post", {"ok": True}
+    if name == "feishu":
+        channel = FeishuNotifier("cli_test", "secret", "oc_1", "chat_id")
+        channel._token = "t-1"
+        channel._token_until = time.time() + 3600
+        return channel, "xueqiu_monitor.notifiers.feishu.requests.post", {"code": 0}
+    channel = SlackNotifier("https://slack.test/hook")
+    return channel, "xueqiu_monitor.notifiers.base.requests.request", {}
+
+
+@pytest.mark.parametrize("name", ["dingtalk", "telegram", "feishu", "slack"])
+def test_distinct_rb_ids_both_send(name):
+    channel, target, payload = _rb_channel(name)
+    with patch(target, return_value=_sent(payload)) as req:
+        assert channel.send_markdown("标题", "甲", cube_id="ZH1", rb_id=2) is True
+        assert channel.send_markdown("标题", "乙", cube_id="ZH1", rb_id=3) is True
+    assert req.call_count == 2
+
+
+@pytest.mark.parametrize("name", ["dingtalk", "telegram", "feishu", "slack"])
+def test_same_rb_id_skips_the_second_send(name):
+    channel, target, payload = _rb_channel(name)
+    with patch(target, return_value=_sent(payload)) as req:
+        assert channel.send_markdown("标题", "甲", cube_id="ZH1", rb_id=2) is True
+        assert channel.send_markdown("标题", "甲再发", cube_id="ZH1", rb_id=2) is True
+    assert req.call_count == 1
