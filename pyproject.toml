@@ -5,6 +5,7 @@ description = "监控雪球组合持仓变动，并推送到已启用的通知�
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "curl-cffi>=0.16.3",
     "playwright>=1.63.0",
     "python-dotenv>=1.0.0",
     "requests>=2.28.0",

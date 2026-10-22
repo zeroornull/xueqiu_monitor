@@ -5,6 +5,8 @@ import logging
 from typing import Optional
 
 import requests
+from curl_cffi.requests import Session
+from curl_cffi.requests.exceptions import HTTPError as CurlHTTPError
 
 from xueqiu_monitor.cookies import _is_user_id_token
 
@@ -13,8 +15,11 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://xueqiu.com"
 _STOCK_BASE = "https://stock.xueqiu.com"
 # 只带登录态。浏览器里的 acw_tc、ssxmod_itna 绑在原浏览器上，重放会得到 400/403。
+# JSON 接口在腾讯 EdgeOne 后面。requests 的 TLS 指纹会被 Bot 管理打成 HTTP 567
+# （页面是「请求异常已被安全策略拦截」），这不是登录票失效。
 _AUTH_COOKIE_NAMES = ("xq_a_token", "u", "xq_id_token", "xq_r_token", "xqat", "xq_is_login")
 _WAF_COOKIE_NAMES = ("acw_tc", "acw_sc__v2", "ssxmod_itna", "ssxmod_itna2")
+_HTTP_ERROR = (requests.exceptions.HTTPError, CurlHTTPError)
 
 
 class CookieExpired(Exception):
@@ -59,15 +64,11 @@ class XueQiuClient:
 
     def __init__(self, cookie: str, portfolio_id: str):
         self.portfolio_id = portfolio_id.upper()
-        self.session = requests.Session()
+        # 不覆盖 User-Agent。impersonate 自带的指纹和请求头要保持一致，
+        # 旧的 Chrome/122 头配上另一套握手仍会被 EdgeOne 拦截。
+        self.session = Session(impersonate="chrome")
         self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://xueqiu.com/",
-            "Accept": "application/json, text/plain, */*",
+            "Referer": f"{_BASE_URL}/",
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
         self._init_session()
@@ -91,9 +92,8 @@ class XueQiuClient:
             return
         if _is_user_id_token(self.session.cookies.get("xq_id_token")):
             return
-        for cookie in list(self.session.cookies):
-            if cookie.name in _AUTH_COOKIE_NAMES:
-                self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        for name in _AUTH_COOKIE_NAMES:
+            self.session.cookies.delete(name)
         for name, value in previous.items():
             self.session.cookies.set(name, value, domain=".xueqiu.com", path="/")
 
@@ -123,9 +123,8 @@ class XueQiuClient:
 
     def _refresh_waf(self) -> None:
         """acw_tc 大约 30 分钟过期。只换风控 Cookie，登录票用回 Secret 里的那份。"""
-        for cookie in list(self.session.cookies):
-            if cookie.name in _WAF_COOKIE_NAMES:
-                self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        for name in _WAF_COOKIE_NAMES:
+            self.session.cookies.delete(name)
         self._init_session()
         self._apply_auth_cookies(self.login_cookie)
 
@@ -134,7 +133,12 @@ class XueQiuClient:
             self._refresh_waf()
         previous = self._auth_cookie_values()
         try:
-            resp = self.session.get(url, params=params, timeout=15)
+            resp = self.session.get(
+                url,
+                params=params,
+                headers={"Referer": f"{_BASE_URL}/P/{self.portfolio_id}"},
+                timeout=15,
+            )
         except Exception as e:
             logger.error(f"请求异常: {url} -> {e}")
             return None
@@ -153,7 +157,7 @@ class XueQiuClient:
         try:
             resp.raise_for_status()
             return resp.json()
-        except requests.exceptions.HTTPError:
+        except _HTTP_ERROR:
             logger.error(f"HTTP {resp.status_code}: {url}")
         except Exception as e:
             logger.error(f"请求异常: {url} -> {e}")

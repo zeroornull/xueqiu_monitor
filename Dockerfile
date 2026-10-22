@@ -15,7 +15,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY xueqiu_monitor ./xueqiu_monitor
-RUN pip install --no-cache-dir "requests==2.34.2" "python-dotenv==1.2.3" \
+RUN pip install --no-cache-dir "requests==2.34.2" "python-dotenv==1.2.3" "curl-cffi==0.16.3" \
     && chown -R app:app /app
 
 USER 1000

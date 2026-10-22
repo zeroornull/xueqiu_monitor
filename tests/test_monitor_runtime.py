@@ -167,8 +167,7 @@ class TestClientParsing:
 
     def test_keeps_only_auth_cookies(self):
         client = _client()
-        names = {cookie.name for cookie in client.session.cookies}
-        assert names == {"xq_a_token", "u"}
+        assert set(client.session.cookies) == {"xq_a_token", "u"}
         assert client.portfolio_id == "ZH1"
 
     def test_current_then_skip_zero_weight(self):
@@ -236,6 +235,18 @@ class TestClientParsing:
         with patch.object(client, "_refresh_waf", wraps=client._refresh_waf):
             assert client._get("https://xueqiu.com/cubes/rebalancing/current.json") == {"last_rb": {"holdings": []}}
         assert client.session.get.call_count == 2
+
+    def test_edgeone_567_is_not_login_failure(self):
+        client = _client()
+        resp = _response(567)
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("567")
+        resp.json.side_effect = ValueError("html")
+        client.session.get = MagicMock(return_value=resp)
+        assert client._get("https://xueqiu.com/cubes/rebalancing/current.json") is None
+
+    def test_session_uses_browser_impersonation(self):
+        client = _client()
+        assert client.session.impersonate == "chrome"
 
     def test_get_returns_none_on_http_error(self):
         client = _client()
